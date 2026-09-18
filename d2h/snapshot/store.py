@@ -20,8 +20,12 @@ from d2h.acquire import process as proc
 SNAP_ROOT = Path(__file__).resolve().parent.parent.parent / "snapshots"
 
 
-def capture(handle: int, pid: int, name: str | None = None) -> tuple[str, dict]:
-    """对只读句柄采集一次快照；返回 (快照名, 元数据)。"""
+def capture(handle: int, pid: int, name: str | None = None,
+            module_name: str = "game.exe") -> tuple[str, dict]:
+    """对只读句柄采集一次快照；返回 (快照名, 元数据)。
+
+    module_name: 要转储的主模块（默认 game.exe；用 loader 时为 D2loader.exe）。
+    """
     SNAP_ROOT.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     snap_name = name or f"snap_{ts}"
@@ -34,6 +38,7 @@ def capture(handle: int, pid: int, name: str | None = None) -> tuple[str, dict]:
         "captured_at": ts,
         "pid": pid,
         "read_only": True,
+        "target_module": module_name,
         "module_base": None,
         "module_size": None,
         "module_dumped": False,
@@ -41,14 +46,14 @@ def capture(handle: int, pid: int, name: str | None = None) -> tuple[str, dict]:
         "region_count": 0,
     }
 
-    mod = proc.get_module_info(handle, "game.exe")
+    mod = proc.get_module_info(handle, module_name)
     if mod:
         base, size = mod
         meta["module_base"] = base
         meta["module_size"] = size
         data = proc.read_bytes(handle, base, size)
         if data is not None:
-            (d / "game_module.bin").write_bytes(data)
+            (d / f"{module_name}_module.bin").write_bytes(data)
             meta["module_dumped"] = True
             meta["module_bytes"] = len(data)
 

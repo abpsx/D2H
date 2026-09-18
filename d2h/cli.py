@@ -51,11 +51,12 @@ def setup_logging() -> Path:
 def cmd_info(args) -> int:
     LOGGER.info("=== D2H 项目信息 ===")
     LOGGER.info("定位: D2H = d2hackmap 的 Python 观测型重写")
-    LOGGER.info("目标版本: 1.13c (game.exe)")
+    LOGGER.info("目标版本: 1.13c")
+    LOGGER.info("默认目标进程: D2loader.exe (loader) | 备选: game.exe")
     LOGGER.info("内存约束: 只读 / 禁止写入 / 允许快照")
     LOGGER.info("运行平台: Windows | 入口: d2h/cli.py (run.bat 唤起)")
-    LOGGER.info("子命令: info | snap | list | parse <快照名>")
-    LOGGER.info("无游戏时 info/list/parse 可离线运行；snap 需游戏在线")
+    LOGGER.info("子命令: info | find [--target]| snap [--target] | list | parse <快照名>")
+    LOGGER.info("无游戏时 info/find/list/parse 可离线运行；snap 需游戏在线")
     return 0
 
 
@@ -63,20 +64,19 @@ def cmd_snap(args) -> int:
     from d2h.acquire import process as proc
     from d2h.snapshot import store
 
-    LOGGER.info("开始查找 game.exe ...")
-    pid = proc.find_pid("game.exe")
+    exe, pid = proc.find_target_pid(args.target)
     if pid is None:
-        LOGGER.warning("未检测到 game.exe 进程（游戏未运行？）。snap 需要游戏在线，已跳过。")
-        LOGGER.warning("提示: 无游戏时可运行 `info` / `list` / `parse` 进行离线开发。")
+        LOGGER.warning("未检测到 %s 进程（游戏未运行？）。snap 需要游戏在线，已跳过。", exe)
+        LOGGER.warning("提示: 无游戏时可运行 `info` / `list` / `parse` / `find` 进行离线开发。")
         return 1
-    LOGGER.info("找到 game.exe, PID=%s", pid)
+    LOGGER.info("找到 %s, PID=%s", exe, pid)
     try:
         handle = proc.open_readonly(pid)
     except OSError as e:
         LOGGER.error("打开进程失败: %s", e)
         return 1
     try:
-        name, meta = store.capture(handle, pid, name=args.name)
+        name, meta = store.capture(handle, pid, name=args.name, module_name=exe)
     finally:
         proc.close(handle)
     LOGGER.info("快照完成: snapshots/%s", name)
@@ -111,6 +111,26 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_find(args) -> int:
+    """查找游戏进程 PID（默认目标 D2loader.exe）。
+
+    找到: 返回 0 并打印 "game PID: <pid> (target: <exe>)"。
+    不存在: 返回 1 并打印 "process not found: <exe>"。
+    """
+    from d2h.acquire import process as proc
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("✗ %s", msg)
+        print(msg)  # 直接打印，确保 bat 控制台可见（不受日志级别影响）
+        return 1
+    msg = f"game PID: {pid}  (target: {exe})"
+    LOGGER.info("✓ 找到 %s, PID=%s", exe, pid)
+    print(msg)
+    return 0
+
+
 def cmd_parse(args) -> int:
     from d2h.snapshot import store
 
@@ -138,12 +158,32 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("info", help="项目/约束/版本信息")
+    fp = sub.add_parser("find", help="查找游戏进程 PID（默认 D2loader.exe）")
+    fp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     sp = sub.add_parser("snap", help="对游戏拍快照（需游戏在线）")
     sp.add_argument("--name", help="快照名（默认 snap_<时间戳>）")
+    sp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     sub.add_parser("list", help="列出本地快照")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
     pp.add_argument("name", help="快照名")
     return p
+
+
+def process_targets() -> dict[str, str]:
+    """延迟导入，避免顶层循环依赖；返回 TARGET_TYPES 的键集合。"""
+    from d2h.acquire import process as proc
+
+    return proc.TARGET_TYPES
 
 
 def main(argv=None) -> int:
@@ -153,6 +193,8 @@ def main(argv=None) -> int:
     try:
         if args.cmd == "info":
             return cmd_info(args)
+        if args.cmd == "find":
+            return cmd_find(args)
         if args.cmd == "snap":
             return cmd_snap(args)
         if args.cmd == "list":

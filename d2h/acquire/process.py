@@ -49,6 +49,14 @@ kernel32.VirtualQueryEx.restype = ctypes.c_size_t
 
 INVALID_HANDLE_VALUE = -1
 
+# 目标进程类型 -> 可执行文件名（见规范 §2.1 / 用户指定）。
+# 默认 "loader" = D2loader.exe（1.13c 经 loader 启动时的实际进程；
+# game.exe 作为模块加载在该进程内，可由 get_module_info 取基址）。
+TARGET_TYPES: dict[str, str] = {
+    "loader": "D2loader.exe",
+    "game": "game.exe",
+}
+
 
 class PROCESSENTRY32(ctypes.Structure):
     _fields_ = [
@@ -97,6 +105,16 @@ def find_pid(name: str = "game.exe") -> int | None:
         return None
     finally:
         kernel32.CloseHandle(h_snap)
+
+
+def find_target_pid(target_key: str = "loader") -> tuple[str, int | None]:
+    """按目标类型键查找 PID。
+
+    返回 (exe_name, pid_or_None)。target_key 既可以是 TARGET_TYPES 的键
+    （loader/game），也可以是原始可执行文件名（如 "D2loader.exe"）。
+    """
+    exe = TARGET_TYPES.get(target_key, target_key)
+    return exe, find_pid(exe)
 
 
 def open_readonly(pid: int) -> int:
