@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def cmd_info(args) -> int:
     LOGGER.info("默认目标进程: D2loader.exe (loader) | 备选: game.exe")
     LOGGER.info("内存约束: 只读 / 禁止写入 / 允许快照")
     LOGGER.info("运行平台: Windows | 入口: d2h/cli.py (run.bat 唤起)")
-    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | items [--target] | list | parse <快照名> | tmp [--clean]")
+    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | items [--target] | ui | watch [--ui] | send <键> | list | parse <快照名> | tmp [--clean] | menu")
     LOGGER.info("临时文件目录: %s（禁止写 C 盘 %%TEMP%%，见规范 §16）", paths.TEMP)
     LOGGER.info("无游戏时 info/find/list/parse 可离线运行；snap 需游戏在线")
     return 0
@@ -492,6 +493,112 @@ def cmd_parse(args) -> int:
     return 0
 
 
+def _watch_ui(handle: int, pid: int, bases: dict, args) -> int:
+    """UI 面板监听：轮询 D2CLIENT+0x50D00 多级指针块，仅在开关变化时输出。"""
+    import time
+
+    from d2h.acquire import game as gm
+    from d2h.acquire import process as proc
+
+    print(
+        f"监听游戏内 UI 面板: *(D2CLIENT+0x50D00) 多级指针  PID={pid}  "
+        f"间隔={args.interval}s  仅在面板开关变化时输出（Ctrl+C 退出）"
+    )
+    LOGGER.info("watch --ui 启动 PID=%s interval=%s", pid, args.interval)
+
+    last: tuple | None = None
+    changes = 0
+    n = 0
+    try:
+        while True:
+            if args.count and n >= args.count:
+                break
+            n += 1
+            ui = gm.read_ui_panels(handle, bases)
+            cur = (tuple(ui["open"]), ui["side"], ui["stash"])
+            if cur != last:
+                ts = time.strftime("%H:%M:%S")
+                opened = ", ".join(ui["open"]) if ui["open"] else "(全部关闭)"
+                print(
+                    f"[{ts}] {opened}  "
+                    f"| 左右位={ui['side']}({ui['side_desc']})  "
+                    f"仓库位={ui['stash']}({ui['stash_desc']})",
+                    flush=True,
+                )
+                LOGGER.info("UI 变动: %s side=%s stash=%s", opened, ui["side"], ui["stash"])
+                last = cur
+                changes += 1
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\n已停止。")
+    finally:
+        proc.close(handle)
+    print(f"采样 {n} 次，变动 {changes} 次。")
+    return 0
+
+
+def cmd_ui(args) -> int:
+    """一次性读取游戏内 UI 面板标记（只读）。"""
+    from d2h.acquire import game as gm
+    from d2h.acquire import offsets as off
+    from d2h.acquire import process as proc
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("[FAIL] %s", msg)
+        print(msg)
+        return 1
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+    try:
+        bases = off.collect_module_bases(handle)
+        code = gm.read_game_state(handle, bases)
+        ing, desc = gm.classify_state(code)
+        ui = gm.read_ui_panels(handle, bases)
+        print(f"PID={pid}  状态={code} ({desc})")
+        print(f"UI 块基址 p=0x{ui['base']:08X}" if ui["base"] else "UI 块不可读（未在游戏中的常见表现）")
+        for o, name, side in off.UI_PANELS:
+            v = ui["panels"].get(name)
+            mark = "开" if v == 1 else ("关" if v == 0 else f"?({v})")
+            print(f"  +{o:02X}  {name:<6} 侧={side}  {mark}")
+        print(f"  左右位(D2CLIENT+0x11C414) = {ui['side']} ({ui['side_desc']})")
+        print(f"  仓库位(D2CLIENT+0x11BC34) = {ui['stash']} ({ui['stash_desc']})")
+        return 0 if ing else 2
+    finally:
+        proc.close(handle)
+
+
+def cmd_send(args) -> int:
+    """向游戏窗口投递按键（PostMessage，不写内存）。用于开发期验证。"""
+    from d2h.acquire import process as proc
+    from d2h.tools import keys as K
+
+    vk = K.resolve_key(args.key)
+    if vk is None:
+        print(f"未知按键: {args.key}（可用: {', '.join(sorted(K.KEYS))} 或单字符/0xNN）")
+        return 1
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("[FAIL] %s", msg)
+        print(msg)
+        return 1
+    hwnd = K.find_main_hwnd(pid)
+    if not hwnd:
+        print(f"未找到窗口句柄 (pid={pid})")
+        return 1
+    ok = True
+    for _ in range(max(1, args.times)):
+        ok = K.send_key(hwnd, vk) and ok
+        time.sleep(args.gap)
+    print(f"send {args.key} (vk=0x{vk:02X}) -> hwnd=0x{hwnd:08X} pid={pid} {'OK' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
 def cmd_watch(args) -> int:
     """变动监听（只读）：按 interval 轮询指针链，**仅在值变动时**向窗口输出一行。
 
@@ -515,6 +622,8 @@ def cmd_watch(args) -> int:
         return 1
 
     bases = off.collect_module_bases(handle)
+    if args.ui:
+        return _watch_ui(handle, pid, bases, args)
     mod, off0, rest = _parse_chain(args.chain)
     if mod:
         if mod not in bases:
@@ -593,6 +702,8 @@ def _dispatch(argv: list[str]) -> int:
         "parse": cmd_parse,
         "menu": cmd_menu,
         "watch": cmd_watch,
+        "ui": cmd_ui,
+        "send": cmd_send,
     }
     fn = table.get(args.cmd)
     return fn(args) if fn is not None else 0
@@ -612,6 +723,9 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("9", "查看临时目录", ["tmp"]),
     ("10", "清空临时目录", ["tmp", "--clean"]),
     ("11", "界面标记监听（0.3 秒轮询，界面切换才输出，Ctrl+C 结束）", ["watch"]),
+    ("12", "游戏内 UI 面板监听（0.3 秒轮询，面板开关变化才输出）", ["watch", "--ui"]),
+    ("13", "查看游戏内 UI 面板（一次性读数）", ["ui"]),
+    ("14", "向游戏投递按键（i/q/c/t/esc，仅窗口消息不写内存）", None),
     ("q", "退出", None),
 ]
 
@@ -667,6 +781,27 @@ def _menu_parse() -> list[str] | None:
         print("  序号超出范围。")
 
 
+def _menu_sendkey() -> list[str] | None:
+    """发键子菜单：返回 send 的 argv，None = 返回上级。"""
+    while True:
+        print()
+        print("  向游戏窗口投递按键（PostMessage，不写内存）：")
+        print("    i. I  背包     q. Q  任务")
+        print("    c. C  属性     t. T  技能树")
+        print("    e. ESC 关闭当前 UI / 无 UI 时打开设置")
+        print("    x. 返回上级菜单")
+        try:
+            t = input("  请选择 [i/q/c/t/e/x]: ").strip().lower()
+        except EOFError:
+            return None
+        if t == "x":
+            return None
+        mapping = {"i": "i", "q": "q", "c": "c", "t": "t", "e": "esc"}
+        if t in mapping:
+            return ["send", mapping[t]]
+        print("  输入无效。")
+
+
 def cmd_menu(args) -> int:
     """交互式中文菜单（run.bat 无参数双击时进入；也可 `cli.py menu` 直接跑）。
 
@@ -682,7 +817,7 @@ def cmd_menu(args) -> int:
             print(f"  {key:>2}. {desc}")
         print("==========================================")
         try:
-            choice = input("请选择 [1-11/q]: ").strip().lower()
+            choice = input("请选择 [1-14/q]: ").strip().lower()
         except EOFError:
             print("(输入结束，退出)")
             return 0
@@ -698,6 +833,8 @@ def cmd_menu(args) -> int:
             argv = _menu_target()
         elif key == "6":
             argv = _menu_parse()
+        elif key == "14":
+            argv = _menu_sendkey()
         if argv is None:
             continue
         print()
@@ -782,6 +919,28 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("--interval", type=float, default=0.3, help="轮询间隔秒（默认 0.3）")
     wp.add_argument("--count", type=int, default=0, help="采样次数上限，0=不限（默认）")
     wp.add_argument(
+        "--ui",
+        action="store_true",
+        help="监听游戏内 UI 面板标记（*(D2CLIENT+0x50D00) 多级指针），而非状态码链",
+    )
+    wp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
+    uip = sub.add_parser("ui", help="一次性读取游戏内 UI 面板标记（背包/属性/技能树/任务/设置…）")
+    uip.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
+    skp = sub.add_parser("send", help="向游戏窗口投递按键（PostMessage，不写内存；仅供开发验证）")
+    skp.add_argument("key", help="按键名: i/q/c/t/esc/enter/space，或单字符、0xNN 虚拟键码")
+    skp.add_argument("--times", type=int, default=1, help="投递次数（默认 1）")
+    skp.add_argument("--gap", type=float, default=0.3, help="多次投递间隔秒（默认 0.3）")
+    skp.add_argument(
         "--target",
         default="loader",
         choices=list(process_targets()),
@@ -822,6 +981,10 @@ def main(argv=None) -> int:
             return cmd_menu(args)
         if args.cmd == "watch":
             return cmd_watch(args)
+        if args.cmd == "ui":
+            return cmd_ui(args)
+        if args.cmd == "send":
+            return cmd_send(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "tmp":

@@ -163,7 +163,57 @@ def classify_state(code: int | None) -> tuple[bool, str]:
         return True, "战网(BN)游戏内"
     if off.STATE_IN_SP_GAME[0] <= code <= off.STATE_IN_SP_GAME[1]:
         return True, "单机游戏内"
+    if code > off.STATE_LOBBY_MAX:
+        # 实测见过 4096（游戏中，UI 面板可正常读写）—— 未归类但确在游戏内
+        return True, f"游戏内（未归类 {code}）"
     return False, f"未知状态码 {code}"
+
+
+def read_ui_panels(handle: int, bases: dict[str, int]) -> dict:
+    """读取游戏内 UI 面板标记（多级指针，只读）。
+
+    链: p = *( D2CLIENT.dll + 0x50D00 )；标志 = *( p + off )，每项 4 字节 DWORD。
+
+    返回 {base, panels:{名称: 值}, open:[已打开面板], side, side_desc, stash, stash_desc}。
+    """
+    out: dict = {
+        "base": None,
+        "panels": {},
+        "open": [],
+        "side": None,
+        "side_desc": "不可读",
+        "stash": None,
+        "stash_desc": "不可读",
+    }
+    base = bases.get(off.UI_PANEL_CHAIN["module"])
+    if not base:
+        return out
+    p = proc.read_uint(handle, base + off.UI_PANEL_CHAIN["offset"], 4)
+    if not p:
+        return out
+    out["base"] = p
+
+    for o, name, side in off.UI_PANELS:
+        v = proc.read_uint(handle, p + o, 4)
+        out["panels"][name] = v
+        if v == 1:
+            out["open"].append(f"{name}({side})" if side != "-" else name)
+
+    sb = bases.get(off.UI_SIDE_FLAG["module"])
+    if sb:
+        sv = proc.read_uint(handle, sb + off.UI_SIDE_FLAG["offset"], 4)
+        out["side"] = sv
+        if sv is not None:
+            out["side_desc"] = off.UI_SIDE_MEANING.get(sv, f"未知({sv})")
+
+    tb = bases.get(off.UI_STASH_FLAG["module"])
+    if tb:
+        tv = proc.read_uint(handle, tb + off.UI_STASH_FLAG["offset"], 4)
+        out["stash"] = tv
+        if tv is not None:
+            out["stash_desc"] = off.UI_STASH_MEANING.get(tv, ("无" if tv == 0 else f"未知({tv})"))
+
+    return out
 
 
 def in_game_status(handle: int, bases: dict[str, int]) -> dict:

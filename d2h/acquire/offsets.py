@@ -73,6 +73,37 @@ STATE_IN_BN_GAME = (2000, 2999)      # 战网游戏内
 STATE_IN_SP_GAME = (3000, 3999)      # 单机游戏内
 STATE_LOBBY_MAX = 999                # < 1000 视为登录界面/不在游戏（如 11）
 
+# ---- 游戏内 UI 面板标记（多级指针；1.13c 实测自真实游戏）----
+# 真源: p = *( D2CLIENT.dll + 0x50D00 )   —— 必须先解引用！
+#       标志在 p + off，每项 4 字节 DWORD。不解引用会读到九位数垃圾。
+# 实测(2026-09-19, pid 10872)：I→+0x00=1, c→+0x04=1, t→+0x0C=1, q→+0x38=1,
+#   无 UI 时 ESC→+0x20=1（设置），有 UI 时 ESC 关闭当前面板。
+UI_PANEL_CHAIN: dict = {
+    "module": "D2CLIENT",
+    "offset": 0x50D00,
+}
+# (偏移, 名称, 停靠侧) —— 侧用于解读 UI_SIDE_FLAG
+UI_PANELS: list[tuple[int, str, str]] = [
+    (0x00, "背包", "右"),
+    (0x04, "属性", "左"),
+    (0x0C, "技能树", "右"),   # 注意：不是 +0x08
+    (0x20, "设置", "-"),
+    (0x38, "任务", "左"),
+    (0x5C, "信息页", "-"),
+    (0x60, "仓库", "左"),
+    (0x64, "盒子", "左"),
+]
+
+# 关联聚合位 A：D2CLIENT.dll + 0x11C414 —— 实测与上面面板联动（同源 UI 系统）
+#   0=无 / 1=右开（背包/技能树）/ 2=左开（属性/任务）/ 3=左右同时开
+UI_SIDE_FLAG: dict = {"module": "D2CLIENT", "offset": 0x11C414}
+UI_SIDE_MEANING: dict[int, str] = {0: "无", 1: "右开", 2: "左开", 3: "左右开"}
+
+# 关联聚合位 B：D2CLIENT.dll + 0x11BC34 —— 12=仓库 / 14=盒子
+#   ⚠️ 未实测（需站在仓库前或打开盒子才能触发），监听时仅原样显示数值。
+UI_STASH_FLAG: dict = {"module": "D2CLIENT", "offset": 0x11BC34}
+UI_STASH_MEANING: dict[int, str] = {12: "仓库", 14: "盒子"}
+
 # ---- 1.13c 全局变量指针（VARS[dll][name] = 默认基址下的绝对地址）----
 # 来源：d2ptrs.h 中 D2VARPTR / D2VARPTR2 的「第一个参数」（即 1.13c 地址）。
 VARS: dict[str, dict[str, int]] = {
