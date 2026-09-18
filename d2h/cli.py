@@ -492,6 +492,138 @@ def cmd_parse(args) -> int:
     return 0
 
 
+def _dispatch(argv: list[str]) -> int:
+    """按 argv 执行一次子命令（菜单内部复用，避免反复启动 Python）。"""
+    args = build_parser().parse_args(argv)
+    table = {
+        "info": cmd_info,
+        "find": cmd_find,
+        "snap": cmd_snap,
+        "state": cmd_state,
+        "items": cmd_items,
+        "probe": cmd_probe,
+        "list": cmd_list,
+        "tmp": cmd_tmp,
+        "parse": cmd_parse,
+    }
+    fn = table.get(args.cmd)
+    return fn(args) if fn is not None else 0
+
+
+# 菜单项：(编号, 说明, argv)。argv 为 None 表示走子流程。
+MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
+    ("1", "项目信息", ["info"]),
+    ("2", "查找游戏 PID（默认 D2loader.exe）", ["find"]),
+    ("3", "查找游戏 PID：选择目标类型", None),
+    ("4", "拍快照（需游戏在线）", ["snap"]),
+    ("5", "列出本地快照", ["list"]),
+    ("6", "解析快照", None),
+    ("7", "当前物品清单（需在游戏中）", ["items"]),
+    ("8", "状态码循环监控（3 秒一次：p 暂停 / Enter 立即读 / q 退出）",
+     ["probe", "FOG+0x4AFE0,+0x8", "--loop", "--interval", "3", "--dump", "0", "--scan", "0"]),
+    ("9", "查看临时目录", ["tmp"]),
+    ("10", "清空临时目录", ["tmp", "--clean"]),
+    ("q", "退出", None),
+]
+
+
+def _menu_target() -> list[str] | None:
+    """目标类型子菜单：返回 find 的 argv，None = 返回上级。"""
+    while True:
+        print()
+        print("  目标进程类型：")
+        print("    l. D2loader.exe（默认）")
+        print("    g. game.exe")
+        print("    x. 返回上级菜单")
+        try:
+            t = input("  请选择 [l/g/x]: ").strip().lower()
+        except EOFError:
+            return None
+        if t == "l":
+            return ["find", "--target", "loader"]
+        if t == "g":
+            return ["find", "--target", "game"]
+        if t == "x":
+            return None
+        print("  输入无效。")
+
+
+def _menu_parse() -> list[str] | None:
+    """快照选择子菜单：返回 parse 的 argv，None = 返回上级。"""
+    from d2h.snapshot import store
+
+    snaps = store.list_snapshots()
+    if not snaps:
+        print("  暂无快照，请先执行选项 4 拍一张。")
+        return None
+    while True:
+        print()
+        print("  选择要解析的快照：")
+        for i, s in enumerate(snaps, 1):
+            print(f"    {i}. {s.get('_name')}")
+        print("    x. 返回上级菜单")
+        try:
+            raw = input("  请输入序号 [x 返回]: ").strip().lower()
+        except EOFError:
+            return None
+        if raw == "x":
+            return None
+        try:
+            idx = int(raw)
+        except ValueError:
+            print("  输入无效。")
+            continue
+        if 1 <= idx <= len(snaps):
+            return ["parse", str(snaps[idx - 1].get("_name"))]
+        print("  序号超出范围。")
+
+
+def cmd_menu(args) -> int:
+    """交互式中文菜单（run.bat 无参数双击时进入；也可 `cli.py menu` 直接跑）。
+
+    bat 保持纯 ASCII（中文会导致 cmd 按本地代码页解碎脚本），
+    所有中文界面与交互全部由 Python 渲染，且子命令在同一进程内复用。
+    """
+    while True:
+        print()
+        print("==========================================")
+        print("            D2H 工具（内存只读）")
+        print("==========================================")
+        for key, desc, _ in MENU_ITEMS:
+            print(f"  {key:>2}. {desc}")
+        print("==========================================")
+        try:
+            choice = input("请选择 [1-10/q]: ").strip().lower()
+        except EOFError:
+            print("(输入结束，退出)")
+            return 0
+        if choice in ("q", "quit", "exit"):
+            print("已退出。")
+            return 0
+        item = next((m for m in MENU_ITEMS if m[0] == choice), None)
+        if item is None:
+            print("输入无效，请重新选择。")
+            continue
+        key, _desc, argv = item
+        if key == "3":
+            argv = _menu_target()
+        elif key == "6":
+            argv = _menu_parse()
+        if argv is None:
+            continue
+        print()
+        try:
+            _dispatch(argv)
+        except SystemExit:
+            pass
+        except Exception as e:  # noqa: BLE001  菜单不因单条命令失败而退出
+            LOGGER.exception("执行出错: %s", e)
+        try:
+            input("\n按回车返回菜单...")
+        except EOFError:
+            return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="d2h", description="D2H 统一入口（只读观测工具）")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -553,6 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="循环监控: 每 --interval 秒读一次, p=暂停/继续, Enter=立即读, q=退出",
     )
     sub.add_parser("list", help="列出本地快照")
+    sub.add_parser("menu", help="交互式中文菜单（run.bat 无参数时默认进入）")
     tp = sub.add_parser("tmp", help="查看/清理项目内临时目录（禁写 C 盘 %TEMP%）")
     tp.add_argument("--clean", action="store_true", help="清空 temp/")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
@@ -584,6 +717,8 @@ def main(argv=None) -> int:
             return cmd_items(args)
         if args.cmd == "probe":
             return cmd_probe(args)
+        if args.cmd == "menu":
+            return cmd_menu(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "tmp":
