@@ -181,6 +181,16 @@ VARS: dict[str, dict[str, int]] = {
         "AutomapLayerList": 0x6FBCC1C0,
         "AutomapLayer": 0x6FBCC1C4,
         "PlayerUnit": 0x6FBCBBFC,
+        # 鼠标指向/选中的单位（UnitAny*）★★
+        # 参考项目里**没有**这个全局变量——hackmap 只调用 GetSelectedUnit 函数
+        # (FUNCTIONS.D2CLIENT.GetSelectedUnit = 0x6FB01A80，见 ViewTargetUnitInfo.cpp)。
+        # 该函数体开头就是 `A1 F4 C2 BC 6F` = mov eax,[0x6FBCC2F4]，命中即返回；
+        # 未命中时清零 0x6FBCC2F8 与 0x6FBCC2F4。故这两个全局就是它读的指针。
+        # 提取方式：只读 dump 函数体（不执行代码），2026-09-19。
+        "SelectedUnit": 0x6FBCC2F4,
+        "SelectedUnit2": 0x6FBCC2F8,    # 与上面成对清零，语义待定（疑 unitId / 类型缓存）
+        "MousePos": 0x6FBCB824,          # D2_POINT_REV 鼠标位置（d2ptrs.h MousePos）
+        "LastMousePos": 0x6FB8BC54,      # 最后一次鼠标位置
         "RosterUnitList": 0x6FBCBC14,
         "PetUnitList": 0x6FBCC4D4,
         "DrlgAct": 0x6FBCC3B8,

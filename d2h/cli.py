@@ -537,6 +537,55 @@ def _watch_ui(handle: int, pid: int, bases: dict, args) -> int:
     return 0
 
 
+UNIT_TYPE_NAME: dict[int, str] = {
+    0: "玩家", 1: "怪物/NPC", 2: "物件", 3: "导弹", 4: "物品", 5: "房间格子",
+}
+
+
+def cmd_hover(args) -> int:
+    """读取鼠标当前指向的单位（UnitAny），只读。"""
+    from d2h.acquire import offsets as off
+    from d2h.acquire import process as proc
+    from d2h.acquire import structs as st
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        print(f"process not found: {exe}")
+        return 1
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+    try:
+        bases = off.collect_module_bases(handle)
+        cb = bases.get("D2CLIENT")
+        if not cb:
+            print("D2CLIENT 模块不可读")
+            return 1
+        rel = off.VARS["D2CLIENT"]["SelectedUnit"] - off.DLLBASE["D2CLIENT"]
+        addr = cb + rel
+        p = proc.read_uint(handle, addr, 4)
+        print(f"PID={pid}  SelectedUnit @0x{addr:08X} = 0x{p:08X}" if p else
+              f"PID={pid}  SelectedUnit @0x{addr:08X} = 0（当前没有指向对象）")
+        if not p:
+            return 0
+        u = proc.read_struct(handle, p, st.UnitAny)
+        tname = UNIT_TYPE_NAME.get(u.dwUnitType, f"未知({u.dwUnitType})")
+        print(f"  类型={u.dwUnitType} {tname}  txtFileNo={u.dwTxtFileNo}  unitId=0x{u.dwUnitId:X}")
+        if u.pPath:
+            x = proc.read_uint(handle, u.pPath + 0x02, 2)
+            y = proc.read_uint(handle, u.pPath + 0x06, 2)
+            print(f"  坐标=({x}, {y})")
+        if u.dwUnitType == 0 and u.pUnitData:
+            raw = proc.read_bytes(handle, u.pUnitData, 16) or b""
+            name = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
+            print(f"  玩家名={name}")
+        return 0
+    finally:
+        proc.close(handle)
+
+
 def cmd_ui(args) -> int:
     """一次性读取游戏内 UI 面板标记（只读）。"""
     from d2h.acquire import game as gm
@@ -708,6 +757,7 @@ def _dispatch(argv: list[str]) -> int:
         "menu": cmd_menu,
         "watch": cmd_watch,
         "ui": cmd_ui,
+        "hover": cmd_hover,
         "send": cmd_send,
     }
     fn = table.get(args.cmd)
@@ -731,6 +781,7 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("12", "游戏内 UI 面板监听（0.3 秒轮询，面板开关变化才输出）", ["watch", "--ui"]),
     ("13", "查看游戏内 UI 面板（一次性读数）", ["ui"]),
     ("14", "向游戏投递按键（i/q/c/t/esc，仅窗口消息不写内存）", None),
+    ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数）", ["hover"]),
     ("q", "退出", None),
 ]
 
@@ -941,6 +992,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(process_targets()),
         help="目标类型: loader=D2loader.exe / game=game.exe",
     )
+    hp = sub.add_parser("hover", help="读取鼠标当前指向的单位（NPC/怪物/物品/物件）")
+    hp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     skp = sub.add_parser("send", help="向游戏窗口投递按键（PostMessage，不写内存；仅供开发验证）")
     skp.add_argument("key", help="按键名: i/q/c/t/esc/enter/space，或单字符、0xNN 虚拟键码")
     skp.add_argument("--times", type=int, default=1, help="投递次数（默认 1）")
@@ -988,6 +1046,8 @@ def main(argv=None) -> int:
             return cmd_watch(args)
         if args.cmd == "ui":
             return cmd_ui(args)
+        if args.cmd == "hover":
+            return cmd_hover(args)
         if args.cmd == "send":
             return cmd_send(args)
         if args.cmd == "list":
