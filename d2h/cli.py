@@ -345,13 +345,11 @@ def cmd_probe(args) -> int:
             origin = f"0x{off0:X}"
         offs = [off0] + rest
 
-        samples = max(1, args.watch)
-        for s in range(samples):
-            if samples > 1:
-                print(f"\n----- sample {s + 1}/{samples}  {time.strftime('%H:%M:%S')} -----")
+        def once(tag: str = "") -> None:
+            """采样并打印一次（含状态码语义解读）。"""
             trace, final_addr, final_val = _eval_chain(handle, base, offs)
 
-            print(f"=== 指针链探测 (只读)  PID={pid} ===")
+            print(f"=== 指针链探测 (只读)  PID={pid} {tag}===")
             print(f"  链  : {args.chain}")
             print(f"  起点: {origin}")
             for name, a, v in trace:
@@ -364,6 +362,14 @@ def cmd_probe(args) -> int:
                     f"  终点值  : dword={final_val}  word={final_val & 0xFFFF}  "
                     f"byte={final_val & 0xFF}"
                 )
+                if final_val < 10000:  # 小值才可能是状态码，顺手给出语义
+                    try:
+                        from d2h.acquire import game as _gm
+
+                        _, _desc = _gm.classify_state(final_val)
+                        print(f"  状态码语义: {_desc}")
+                    except Exception:
+                        pass
             if args.dump > 0:
                 raw = proc.read_bytes(handle, final_addr, args.dump)
                 if raw:
@@ -389,8 +395,54 @@ def cmd_probe(args) -> int:
                             found += 1
                     if not found:
                         print("    (无候选)")
-            if samples > 1 and s < samples - 1:
-                time.sleep(args.interval)
+
+        # 循环监控模式：每 interval 秒自动读一次，p 暂停/继续，Enter 立即读，q 退出
+        if args.loop:
+            import msvcrt
+
+            paused = False
+            print(
+                "循环监控: 每 %.1f 秒读一次 | p=暂停/继续 | Enter=立即读 | q=退出"
+                % args.interval,
+                flush=True,
+            )
+            while True:
+                once(f"[{time.strftime('%H:%M:%S')}] ")
+                if paused:
+                    print("  [已暂停] p=继续 / Enter=读一次 / q=退出", flush=True)
+                    ch = msvcrt.getwch()
+                else:
+                    deadline = time.time() + args.interval
+                    ch = ""
+                    while time.time() < deadline:
+                        if msvcrt.kbhit():
+                            ch = msvcrt.getwch()
+                            break
+                        time.sleep(0.05)
+                if ch.lower() == "q":
+                    print("  (退出循环监控)", flush=True)
+                    break
+                if ch.lower() == "p":
+                    paused = not paused
+                    print("  [已暂停]" if paused else "  [继续监控]", flush=True)
+            return 0
+
+        samples = max(1, args.watch)
+        for s in range(samples):
+            if samples > 1:
+                print(f"\n----- sample {s + 1}/{samples}  {time.strftime('%H:%M:%S')} -----")
+            once()
+            if s < samples - 1:
+                if args.pause:
+                    try:
+                        line = input("  >>> 切换游戏界面后按 Enter 读取下一次 (输入 q+Enter 退出)...")
+                    except EOFError:
+                        break
+                    if line.strip().lower() == "q":
+                        print("  (用户中止)")
+                        break
+                else:
+                    time.sleep(args.interval)
         return 0
     finally:
         proc.close(handle)
@@ -468,6 +520,16 @@ def build_parser() -> argparse.ArgumentParser:
     prp.add_argument("--scan", type=lambda s: int(s, 0), default=0, help="终点扫描范围，打印小整数候选（0=关闭）")
     prp.add_argument("--watch", type=int, default=1, help="采样次数（>1 持续观察）")
     prp.add_argument("--interval", type=float, default=2.0, help="采样间隔秒")
+    prp.add_argument(
+        "--pause",
+        action="store_true",
+        help="每次采样后暂停等按键（可手动切游戏界面再读，观察状态码跳变）",
+    )
+    prp.add_argument(
+        "--loop",
+        action="store_true",
+        help="循环监控: 每 --interval 秒读一次, p=暂停/继续, Enter=立即读, q=退出",
+    )
     sub.add_parser("list", help="列出本地快照")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
     pp.add_argument("name", help="快照名")

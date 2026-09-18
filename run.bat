@@ -24,10 +24,11 @@ echo 4. Take snapshot (snap, game online)
 echo 5. List snapshots (list)
 echo 6. Parse snapshot (parse)
 echo 7. Current item list (items, game online)
+echo 8. Watch state code step-by-key (probe FOG+0x4AFE0,+0x8)
 echo q. Quit
 echo ====================================
 set "CHOICE="
-set /p CHOICE=Select [1-6/q]:
+set /p CHOICE=Select [1-8/q]:
 if "%CHOICE%"=="1" goto do_info
 if "%CHOICE%"=="2" goto do_find
 if "%CHOICE%"=="3" goto choose_target
@@ -35,6 +36,7 @@ if "%CHOICE%"=="4" goto do_snap
 if "%CHOICE%"=="5" goto do_list
 if "%CHOICE%"=="6" goto do_parse
 if "%CHOICE%"=="7" goto do_items
+if "%CHOICE%"=="8" goto do_probe
 if /i "%CHOICE%"=="q" goto end
 echo Invalid selection, try again.
 goto menu
@@ -61,6 +63,10 @@ goto menu
 
 :do_items
 call :run items
+goto menu
+
+:do_probe
+call :run probe "FOG+0x4AFE0,+0x8" --loop --interval 3 --dump 0 --scan 0
 goto menu
 
 :choose_target
