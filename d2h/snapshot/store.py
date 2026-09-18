@@ -21,10 +21,15 @@ SNAP_ROOT = Path(__file__).resolve().parent.parent.parent / "snapshots"
 
 
 def capture(handle: int, pid: int, name: str | None = None,
-            module_name: str = "game.exe") -> tuple[str, dict]:
+            module_name: str = "game.exe", label: str | None = None,
+            state_code: int | None = None,
+            module_bases: dict | None = None) -> tuple[str, dict]:
     """对只读句柄采集一次快照；返回 (快照名, 元数据)。
 
     module_name: 要转储的主模块（默认 game.exe；用 loader 时为 D2loader.exe）。
+    label:      人工标记（如 "11战网登录界面"）。
+    state_code: 采集瞬间的游戏状态码（Fog 多级指针读出），自动写入 meta 便于对照。
+    module_bases: 各模块真实基址，一并存档（离线解析时要用，防止重定位导致偏移错）。
     """
     SNAP_ROOT.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -44,6 +49,9 @@ def capture(handle: int, pid: int, name: str | None = None,
         "module_dumped": False,
         "module_bytes": 0,
         "region_count": 0,
+        "label": label,
+        "state_code": state_code,
+        "module_bases": {str(k): int(v) for k, v in (module_bases or {}).items()},
     }
 
     mod = proc.get_module_info(handle, module_name)

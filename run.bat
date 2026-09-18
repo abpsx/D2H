@@ -23,6 +23,7 @@ echo 3. Find game PID - choose target type
 echo 4. Take snapshot (snap, game online)
 echo 5. List snapshots (list)
 echo 6. Parse snapshot (parse)
+echo 7. Current item list (items, game online)
 echo q. Quit
 echo ====================================
 set "CHOICE="
@@ -33,6 +34,7 @@ if "%CHOICE%"=="3" goto choose_target
 if "%CHOICE%"=="4" goto do_snap
 if "%CHOICE%"=="5" goto do_list
 if "%CHOICE%"=="6" goto do_parse
+if "%CHOICE%"=="7" goto do_items
 if /i "%CHOICE%"=="q" goto end
 echo Invalid selection, try again.
 goto menu
@@ -55,6 +57,10 @@ goto menu
 
 :do_parse
 call :run parse
+goto menu
+
+:do_items
+call :run items
 goto menu
 
 :choose_target

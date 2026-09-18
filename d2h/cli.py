@@ -55,13 +55,15 @@ def cmd_info(args) -> int:
     LOGGER.info("默认目标进程: D2loader.exe (loader) | 备选: game.exe")
     LOGGER.info("内存约束: 只读 / 禁止写入 / 允许快照")
     LOGGER.info("运行平台: Windows | 入口: d2h/cli.py (run.bat 唤起)")
-    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | list | parse <快照名>")
+    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | items [--target] | list | parse <快照名>")
     LOGGER.info("无游戏时 info/find/list/parse 可离线运行；snap 需游戏在线")
     return 0
 
 
 def cmd_snap(args) -> int:
     from d2h.acquire import process as proc
+    from d2h.acquire import offsets as off
+    from d2h.acquire import game as gm
     from d2h.snapshot import store
 
     exe, pid = proc.find_target_pid(args.target)
@@ -76,10 +78,18 @@ def cmd_snap(args) -> int:
         LOGGER.error("打开进程失败: %s", e)
         return 1
     try:
-        name, meta = store.capture(handle, pid, name=args.name, module_name=exe)
+        bases = off.collect_module_bases(handle)
+        state_code = gm.read_game_state(handle, bases)
+        _, desc = gm.classify_state(state_code)
+        LOGGER.info("采集瞬间状态码: %s (%s)", state_code, desc)
+        name, meta = store.capture(
+            handle, pid, name=args.name, module_name=exe,
+            label=args.label, state_code=state_code, module_bases=bases,
+        )
     finally:
         proc.close(handle)
-    LOGGER.info("快照完成: snapshots/%s", name)
+    LOGGER.info("快照完成: snapshots/%s  标签=%s", name, args.label or "(无)")
+    LOGGER.info("  状态码 state_code=%s", meta.get("state_code"))
     LOGGER.info(
         "  模块基址=0x%x 大小=%s 字节 已转储=%s",
         meta.get("module_base") or 0,
@@ -184,6 +194,208 @@ def cmd_find(args) -> int:
     return 0
 
 
+def cmd_items(args) -> int:
+    """判断是否在游戏中；若在则生成「当前游戏物品清单.md」（只读）。
+
+    状态码（约定）: 2000=未在游戏 / 2100=在游戏但玩家单位不可读 / 3000=已生成清单。
+    同时输出 game_mode（GameInfo+0x1EB），在线时约 3936（3xxx 区间）。
+    """
+    from d2h.acquire import process as proc
+    from d2h.acquire import offsets as off
+    from d2h.acquire import game as gm
+    from d2h.acquire import items as itm
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("✗ %s", msg)
+        print(msg)
+        return 1
+    LOGGER.info("找到 %s, PID=%s", exe, pid)
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+    try:
+        bases = off.collect_module_bases(handle)
+        LOGGER.info("已加载模块基址: %s", ", ".join(f"{k}=0x{v:X}" for k, v in bases.items()))
+        if "D2CLIENT" not in bases:
+            LOGGER.error("未找到 D2Client.dll，无法解析（确认游戏已进游戏界面？）")
+            return 1
+        status = gm.in_game_status(handle, bases)
+        gm_mode = status.get("game_mode")
+        if not status["in_game"]:
+            code = 2000
+            print(f"STATUS: {code}  (未在游戏中)  game_mode={gm_mode}")
+            LOGGER.info("STATUS %s: 未在游戏中 (game_mode=%s)", code, gm_mode)
+            return 1
+        if status["status"] == 2100:
+            code = 2100
+            print(f"STATUS: {code}  (在游戏但玩家单位不可读)  game_mode={gm_mode}")
+            LOGGER.warning("STATUS %s: 在游戏但玩家单位不可读", code)
+            return 1
+
+        # 在游戏中 -> 生成清单
+        state = gm.read_state(handle, bases)
+        items = itm.named_inventory(handle, bases)
+        meta = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "char_name": state.get("char_name") or state.get("player_name") or "?",
+            "class_name": "?",
+            "game_name": state.get("game_name") or "?",
+            "realm": state.get("realm") or "?",
+            "status": 3000,
+            "status_desc": f"在游戏中 game_mode={gm_mode}",
+        }
+        md = itm.render_markdown(items, meta)
+        out_path = ROOT / "当前游戏物品清单.md"
+        out_path.write_text(md, encoding="utf-8")
+        code = 3000
+        print(f"STATUS: {code}  (在游戏中)  game_mode={gm_mode}  物品数={len(items)}")
+        print(f"已生成: {out_path}")
+        LOGGER.info("STATUS %s: 在游戏中, 物品数=%s, 清单=%s", code, len(items), out_path)
+        for i, x in enumerate(items[:15], 1):
+            LOGGER.info(
+                "  [%s] %s (%s) 质量=%s ilvl=%s 孔=%s loc=%s",
+                i, x.get("name"), x.get("code"),
+                itm.QUALITY_NAME.get(x.get("quality", 0), x.get("quality")),
+                x.get("ilvl"), x.get("socket", 0),
+                x.get("body", 0) or x.get("location", 0),
+            )
+    finally:
+        proc.close(handle)
+    return 0
+
+
+def _parse_chain(chain: str) -> tuple[str | None, int, list[int]]:
+    """解析指针链，返回 (模块名|None, 首偏移, 后续偏移列表)。
+
+    语法（Cheat Engine 语义：最后一段只加偏移、不再解引用）:
+        D2CLIENT+0x50D00             -> 值 = *(D2CLIENT + 0x50D00)
+        D2CLIENT+0x50D00,+0x10       -> 值 = *( *(D2CLIENT+0x50D00) + 0x10 )
+        D2CLIENT+0x50D00,+0x4,+0x1C  -> 再深一层
+        0x6FB00D00                   -> 绝对地址起步
+    """
+    parts = [p.strip() for p in chain.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("空的指针链")
+    head = parts[0]
+    if "+" in head:
+        mod, offs = head.split("+", 1)
+        return mod.strip().upper(), int(offs.strip(), 16), [int(p, 16) for p in parts[1:]]
+    return None, int(head, 16), [int(p, 16) for p in parts[1:]]
+
+
+def _eval_chain(handle: int, base: int, offs: list[int]):
+    """沿偏移链求值。返回 (trace, 最终地址, 最终 dword 值)。
+
+    trace: [(层名, 地址, 该地址读到的 dword)]，便于逐层肉眼核对。
+    """
+    from d2h.acquire import process as proc
+
+    trace: list[tuple[str, int, int | None]] = []
+    addr = base + offs[0]
+    val = proc.read_uint(handle, addr, 4)
+    trace.append(("L0", addr, val))
+    if len(offs) == 1:
+        return trace, addr, val
+    p = val or 0
+    for i, o in enumerate(offs[1:], start=1):
+        a = p + o
+        v = proc.read_uint(handle, a, 4) if a else None
+        trace.append((f"L{i}", a, v))
+        if i == len(offs) - 1:
+            return trace, a, v
+        p = v or 0
+    return trace, addr, val
+
+
+def cmd_probe(args) -> int:
+    """多级指针链求值/探测（只读）：打印每一层地址与值，并在终点 dump + 扫描状态码候选。"""
+    import struct
+    import time
+
+    from d2h.acquire import process as proc
+    from d2h.acquire import offsets as off
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("✗ %s", msg)
+        print(msg)
+        return 1
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+
+    try:
+        bases = off.collect_module_bases(handle)
+        mod, off0, rest = _parse_chain(args.chain)
+        if mod:
+            if mod not in bases:
+                print(f"module not loaded: {mod}  (已加载: {', '.join(sorted(bases))})")
+                return 1
+            base = bases[mod]
+            origin = f"{mod}(0x{base:X})+0x{off0:X}"
+        else:
+            base = 0
+            origin = f"0x{off0:X}"
+        offs = [off0] + rest
+
+        samples = max(1, args.watch)
+        for s in range(samples):
+            if samples > 1:
+                print(f"\n----- sample {s + 1}/{samples}  {time.strftime('%H:%M:%S')} -----")
+            trace, final_addr, final_val = _eval_chain(handle, base, offs)
+
+            print(f"=== 指针链探测 (只读)  PID={pid} ===")
+            print(f"  链  : {args.chain}")
+            print(f"  起点: {origin}")
+            for name, a, v in trace:
+                vs = "0x%08X" % v if v is not None else "不可读"
+                print(f"  {name}: [0x{a:08X}] -> {vs}")
+            print(f"  终点地址: 0x{final_addr:08X}")
+
+            if final_val is not None:
+                print(
+                    f"  终点值  : dword={final_val}  word={final_val & 0xFFFF}  "
+                    f"byte={final_val & 0xFF}"
+                )
+            if args.dump > 0:
+                raw = proc.read_bytes(handle, final_addr, args.dump)
+                if raw:
+                    print(f"  --- dump 0x{args.dump:X} bytes @ 0x{final_addr:08X} ---")
+                    for i in range(0, len(raw), 16):
+                        print(f"    +0x{i:03X}: {raw[i:i + 16].hex(' ')}")
+                else:
+                    print("  (终点不可读)")
+
+            if args.scan > 0:
+                raw = proc.read_bytes(handle, final_addr, args.scan)
+                if raw:
+                    print(f"  --- 状态码候选扫描 (+0x0..+0x{args.scan:X}, 值 1..9999) ---")
+                    found = 0
+                    for i in range(0, len(raw) - 3, 4):
+                        v = struct.unpack_from("<I", raw, i)[0]
+                        if 0 < v < 10000:
+                            print(f"    +0x{i:03X} dword = {v}")
+                            found += 1
+                    for i in range(0, len(raw)):
+                        if 0 < raw[i] < 100:
+                            print(f"    +0x{i:03X} byte  = {raw[i]}")
+                            found += 1
+                    if not found:
+                        print("    (无候选)")
+            if samples > 1 and s < samples - 1:
+                time.sleep(args.interval)
+        return 0
+    finally:
+        proc.close(handle)
+
+
 def cmd_parse(args) -> int:
     from d2h.snapshot import store
 
@@ -220,6 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp = sub.add_parser("snap", help="对游戏拍快照（需游戏在线）")
     sp.add_argument("--name", help="快照名（默认 snap_<时间戳>）")
+    sp.add_argument("--label", help="人工标记（如 \"11战网登录界面\"），写入 meta.json")
     sp.add_argument(
         "--target",
         default="loader",
@@ -233,6 +446,28 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(process_targets()),
         help="目标类型: loader=D2loader.exe / game=game.exe",
     )
+    itp = sub.add_parser("items", help="判断是否在游戏中；若在则生成「当前游戏物品清单.md」")
+    itp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
+    prp = sub.add_parser("probe", help="多级指针链探测（只读逐层解引用/dump/扫描）")
+    prp.add_argument(
+        "chain",
+        help='指针链, 如 "FOG+0x4AFE0,+0x8" / "D2CLIENT+0x50D00,+0x10" / "0x6FF9AFE0"',
+    )
+    prp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
+    prp.add_argument("--dump", type=lambda s: int(s, 0), default=64, help="终点 dump 字节数（0=关闭）")
+    prp.add_argument("--scan", type=lambda s: int(s, 0), default=0, help="终点扫描范围，打印小整数候选（0=关闭）")
+    prp.add_argument("--watch", type=int, default=1, help="采样次数（>1 持续观察）")
+    prp.add_argument("--interval", type=float, default=2.0, help="采样间隔秒")
     sub.add_parser("list", help="列出本地快照")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
     pp.add_argument("name", help="快照名")
@@ -259,6 +494,10 @@ def main(argv=None) -> int:
             return cmd_snap(args)
         if args.cmd == "state":
             return cmd_state(args)
+        if args.cmd == "items":
+            return cmd_items(args)
+        if args.cmd == "probe":
+            return cmd_probe(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "parse":

@@ -53,6 +53,22 @@ MODULE_FILE: dict[str, str] = {
     "D2MCPCLIENT": "D2MCPClient.dll",
 }
 
+# ---- 游戏状态码（多级指针，实测自 Fog.dll；1.13c）----
+# 链:  *( *( Fog.dll + 0x4AFE0 ) + 0x08 )  = 状态码
+# 实测：11 = 战网登录界面；14 = 登录界面（同为「不在游戏」态，具体成因待查）。
+# 语义（用户确认）：<1000（11 / 14 等）= 登录界面、不在游戏；
+#                  2xxx = 战网(BN) 游戏内；3xxx = 单机游戏内。
+STATE_CHAIN: dict = {
+    "module": "FOG",      # 逻辑模块名（MODULE_FILE -> Fog.dll）
+    "offset": 0x4AFE0,    # 第一级偏移（相对 Fog.dll 真实基址）
+    "final": 0x08,        # 第二级偏移，此处即为状态码（不再解引用）
+}
+
+# 状态码区间语义（用于判定"是否在游戏"）
+STATE_IN_BN_GAME = (2000, 2999)      # 战网游戏内
+STATE_IN_SP_GAME = (3000, 3999)      # 单机游戏内
+STATE_LOBBY_MAX = 999                # < 1000 视为登录界面/不在游戏（如 11）
+
 # ---- 1.13c 全局变量指针（VARS[dll][name] = 默认基址下的绝对地址）----
 # 来源：d2ptrs.h 中 D2VARPTR / D2VARPTR2 的「第一个参数」（即 1.13c 地址）。
 VARS: dict[str, dict[str, int]] = {
