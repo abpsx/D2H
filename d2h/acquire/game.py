@@ -155,8 +155,10 @@ def classify_state(code: int | None) -> tuple[bool, str]:
     """把状态码归类为 (是否在游戏, 中文说明)。"""
     if code is None:
         return False, "状态码不可读"
-    if code <= off.STATE_LOBBY_MAX:
-        return False, f"不在游戏（登录/大厅，state={code}）"
+    if code is not None and code <= off.STATE_LOBBY_MAX:
+        name = off.STATE_MEANING.get(code)
+        tail = f"（不在游戏，state={code}）"
+        return False, (name + tail) if name else ("登录/大厅界面" + tail)
     if off.STATE_IN_BN_GAME[0] <= code <= off.STATE_IN_BN_GAME[1]:
         return True, "战网(BN)游戏内"
     if off.STATE_IN_SP_GAME[0] <= code <= off.STATE_IN_SP_GAME[1]:
