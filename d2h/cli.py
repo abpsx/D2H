@@ -17,12 +17,15 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LOGS = ROOT / "logs"
 
 # 无论以何种方式调用（脚本路径/模块/cwd 不同），都把项目根加入 sys.path，
 # 保证 `import d2h` 始终可用（见规范 §15 统一入口）。
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from d2h import paths  # noqa: E402  （需在 sys.path 注入后导入）
+
+LOGS = paths.LOGS  # 目录位置以 d2h/paths.py 为唯一权威（规范 §16）
 
 LOGGER = logging.getLogger("d2h")
 
@@ -55,8 +58,27 @@ def cmd_info(args) -> int:
     LOGGER.info("默认目标进程: D2loader.exe (loader) | 备选: game.exe")
     LOGGER.info("内存约束: 只读 / 禁止写入 / 允许快照")
     LOGGER.info("运行平台: Windows | 入口: d2h/cli.py (run.bat 唤起)")
-    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | items [--target] | list | parse <快照名>")
+    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | items [--target] | list | parse <快照名> | tmp [--clean]")
+    LOGGER.info("临时文件目录: %s（禁止写 C 盘 %%TEMP%%，见规范 §16）", paths.TEMP)
     LOGGER.info("无游戏时 info/find/list/parse 可离线运行；snap 需游戏在线")
+    return 0
+
+
+def cmd_tmp(args) -> int:
+    """查看 / 清理项目内临时目录（禁止 C 盘 %TEMP%）。"""
+    if args.clean:
+        n, fail = paths.clean_temp()
+        LOGGER.info("已清理 temp/: 删除 %s 项，失败 %s 项", n, fail)
+        if fail:
+            return 1
+        return 0
+    info = paths.temp_info()
+    LOGGER.info("=== 项目临时目录 ===")
+    LOGGER.info("路径: %s", info["temp_dir"])
+    LOGGER.info("文件: %s 个 | 子目录: %s 个 | 占用: %s 字节", info["files"], info["dirs"], info["bytes"])
+    if info["sample"]:
+        LOGGER.info("示例: %s", ", ".join(info["sample"]))
+    LOGGER.info("清理: d2h/cli.py tmp --clean")
     return 0
 
 
@@ -531,6 +553,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="循环监控: 每 --interval 秒读一次, p=暂停/继续, Enter=立即读, q=退出",
     )
     sub.add_parser("list", help="列出本地快照")
+    tp = sub.add_parser("tmp", help="查看/清理项目内临时目录（禁写 C 盘 %TEMP%）")
+    tp.add_argument("--clean", action="store_true", help="清空 temp/")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
     pp.add_argument("name", help="快照名")
     return p
@@ -562,6 +586,8 @@ def main(argv=None) -> int:
             return cmd_probe(args)
         if args.cmd == "list":
             return cmd_list(args)
+        if args.cmd == "tmp":
+            return cmd_tmp(args)
         if args.cmd == "parse":
             return cmd_parse(args)
         return 0
