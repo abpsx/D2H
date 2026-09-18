@@ -564,7 +564,8 @@ def cmd_ui(args) -> int:
         for o, name, side in off.UI_PANELS:
             v = ui["panels"].get(name)
             mark = "开" if v == 1 else ("关" if v == 0 else f"?({v})")
-            print(f"  +{o:02X}  {name:<6} 侧={side}  {mark}")
+            key = off.UI_PANEL_KEYS.get(name, "")
+            print(f"  +{o:02X}  {name:<8} 侧={side}  键={key:<11} {mark}")
         print(f"  左右位(D2CLIENT+0x11C414) = {ui['side']} ({ui['side_desc']})")
         print(f"  仓库位(D2CLIENT+0x11BC34) = {ui['stash']} ({ui['stash_desc']})")
         return 0 if ing else 2
