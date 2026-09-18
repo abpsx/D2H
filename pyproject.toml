@@ -1,0 +1,9 @@
+[project]
+name = "d2h"
+version = "0.0.1"
+description = "D2H - 只读观测型 Diablo II 1.13c 工具（Python），对应 d2hackmap"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
