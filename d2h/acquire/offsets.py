@@ -100,15 +100,15 @@ UI_PANELS: list[tuple[int, str, str]] = [
     (0x08, "属性", "左"),            # [V] STATS     键 C
     (0x0C, "技能组(左右手)", "-"),    # [U] CURRSKILL 左右手技能选择（不是技能树）
     (0x10, "技能树", "右"),          # [V] SKILLS    键 T
-    (0x14, "聊天输入", "-"),         # [?] CHATINPUT 键 ENTER
-    (0x18, "新属性点按钮", "-"),      # [?] NEWSTATS  （当前=1，疑"有未分配属性点"）
-    (0x1C, "新技能点按钮", "-"),      # [?] NEWSKILL  （当前=1，疑"有未分配技能点"）
+    (0x14, "聊天输入", "-"),         # [U] CHATINPUT（用户已核验） 键 ENTER
+    (0x18, "新属性点按钮", "-"),      # [U] NEWSTATS（用户已核验）  （当前=1，疑"有未分配属性点"）
+    (0x1C, "新技能点按钮", "-"),      # [U] NEWSKILL（用户已核验）  （当前=1，疑"有未分配技能点"）
     (0x20, "NPC对话框", "-"),        # [U] INTERACT
     (0x24, "设置", "-"),             # [V] GAMEMENU  无 UI 时按 ESC 打开
     (0x28, "地图", "-"),             # [U] AUTOMAP   = 全局 AutomapOn，键 TAB
-    (0x2C, "配置快捷键", "-"),        # [?] CFGCTRLS
+    (0x2C, "配置快捷键", "-"),        # [U] CFGCTRLS（用户已核验）
     (0x30, "商店(NPC交易)", "-"),     # [U] NPCTRADE
-    (0x34, "显地面物品", "-"),        # [?] SHOWITEMS 键 ALT
+    (0x34, "显地面物品", "-"),        # [U] SHOWITEMS（用户已核验） 键 ALT
     (0x38, "打孔/注入窗", "-"),       # [U] MODITEM   （用户原称"任务物品提交窗"）
     (0x3C, "任务", "左"),            # [V] QUEST     键 Q
     (0x40, "UNK16", "-"),            # [?]
@@ -118,7 +118,7 @@ UI_PANELS: list[tuple[int, str, str]] = [
     (0x50, "传送", "-"),             # [U] WAYPOINT
     (0x54, "迷你标签栏", "-"),        # [U] MINIPANEL
     (0x58, "组队", "-"),             # [V] PARTY     键 P
-    (0x5C, "玩家交易", "-"),          # [?] PPLTRADE
+    (0x5C, "玩家交易", "-"),          # [U] PPLTRADE（用户已核验）
     (0x60, "信息页(消息日志)", "-"),   # [U] MSGLOG
     (0x64, "仓库", "左"),            # [V] STASH
     (0x68, "盒子", "左"),            # [U] CUBE
@@ -128,11 +128,11 @@ UI_PANELS: list[tuple[int, str, str]] = [
     (0x78, "背包4", "-"),            # [?] INVENTORY4
     (0x7C, "腰带", "-"),             # [?] BELT
     (0x80, "UNK32", "-"),            # [?]
-    (0x84, "帮助", "-"),             # [?] HELP      键 H
+    (0x84, "帮助", "-"),             # [U] HELP（用户已核验）      键 H
     (0x88, "UNK34", "-"),            # [?]
-    (0x8C, "队头像", "-"),            # [?] PARTYHEAD （当前=1）
+    (0x8C, "玩家头像列表", "-"),            # [U] PARTYHEAD（用户判明=玩家头像列表） （当前=1）
     (0x90, "佣兵装备", "-"),          # [V] PET       键 O
-    (0x94, "任务卷轴", "-"),          # [?] QUESTSCROLL 点击任务物品时显示任务信息
+    (0x94, "任务卷轴", "-"),          # [U] QUESTSCROLL（用户已核验） 点击任务物品时显示任务信息
 ]
 
 # index -> hackmap `enum UIVar` 名字（便于回查参考项目源码里的用法）
