@@ -542,11 +542,172 @@ UNIT_TYPE_NAME: dict[int, str] = {
 }
 
 
+def _read_unit_head(handle, p: int):
+    """逐字段读 UnitAny 头部（+0x00..+0x2C）。指针不可读返回 None。
+
+    注意：不整块 read_struct —— 悬停单位被释放后 SelectedUnit 会留下陈旧指针，
+    整块读会直接失败；逐字段读至少能拿到已缓存的部分。
+    """
+    from d2h.acquire import process as proc
+
+    if not p:
+        return None
+    t = proc.read_uint(handle, p + 0x00, 4)
+    if t is None:
+        return None
+    return {
+        "dwUnitType": t,
+        "dwTxtFileNo": proc.read_uint(handle, p + 0x04, 4),
+        "dwUnitId": proc.read_uint(handle, p + 0x0C, 4),
+        "dwMode": proc.read_uint(handle, p + 0x10, 4),
+        "pUnitData": proc.read_uint(handle, p + 0x14, 4),
+        "pPath": proc.read_uint(handle, p + 0x2C, 4),
+    }
+
+
+def _num(v, hexa: bool = False) -> str:
+    """字段可能为 None（读不到），统一显示为 '-'。"""
+    if v is None:
+        return "-"
+    return f"0x{v:X}" if hexa else str(v)
+
+
+def _dump_hover(handle, p: int) -> None:
+    """打印 SelectedUnit 指向的单位信息。"""
+    from d2h.acquire import process as proc
+
+    u = _read_unit_head(handle, p)
+    if u is None:
+        print(f"  指针 0x{p:08X} 不可读 -> 单位多半已被释放（陈旧指针）。"
+              "把鼠标重新移到对象上再读一次")
+        return
+    t = u["dwUnitType"]
+    tname = UNIT_TYPE_NAME.get(t, f"未知({t})")
+    print(f"  类型={t} {tname}  txtFileNo={_num(u['dwTxtFileNo'])}  "
+          f"unitId={_num(u['dwUnitId'], True)}  mode={_num(u['dwMode'])}")
+    pp = u["pPath"]
+    if pp:
+        x = proc.read_uint(handle, pp + 0x02, 2)
+        y = proc.read_uint(handle, pp + 0x06, 2)
+        if x is None or y is None:
+            print(f"  坐标=<读不到 pPath=0x{pp:08X}>")
+        else:
+            print(f"  坐标=({x}, {y})")
+    if t == 0 and u["pUnitData"]:
+        raw = proc.read_bytes(handle, u["pUnitData"], 16) or b""
+        name = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
+        print(f"  玩家名={name}")
+
+
+def _looks_like_unit(handle, v, block=None):
+    """判断 v 是否像一个真的 UnitAny*。返回 (type, txt, id, x, y) 或 None。
+
+    过滤条件刻意从严——把任意数据当 UnitAny 解析时 dwUnitType 极易 <=5，
+    必须靠 unitId / txtFileNo / pPath 坐标联合校验才不会全是噪声。
+    """
+    from d2h.acquire import process as proc
+
+    if v % 4 or not (0x10000 < v < 0x7E000000):
+        return None
+    if block and block[0] <= v < block[1]:
+        return None  # 指向采样块自身 = 多半是链表/自引用，不是悬停指针
+    t = proc.read_uint(handle, v + 0x00, 4)
+    if t is None or t > 5:
+        return None
+    txt = proc.read_uint(handle, v + 0x04, 4)
+    if txt is None or txt > 0x10000:
+        return None
+    uid = proc.read_uint(handle, v + 0x0C, 4)
+    if not uid or uid > 0x100000:
+        return None
+    pp = proc.read_uint(handle, v + 0x2C, 4)
+    if not pp:
+        return None
+    x = proc.read_uint(handle, pp + 0x02, 2)
+    y = proc.read_uint(handle, pp + 0x06, 2)
+    if x is None or y is None:
+        return None
+    return (t, txt, uid, x, y)
+
+
+def _scan_hover_unit(handle, cb: int, seconds: float, interval: float,
+                     lo: int, hi: int) -> int:
+    """差异扫描：定位"鼠标指向对象"的指针存在哪个全局里。
+
+    做法：持续采样 D2CLIENT 数据段的一段，把「发生变化、且新值经严格校验确实
+    是 UnitAny」的地址记下来。运行期间把鼠标移到 NPC/怪物/物品上并**停住不动**
+    ——真指针只在移上去的那一刻变一次，之后保持不变；每帧乱变的是噪声，
+    所以扫描结束时会再复检一次，仍指向同一单位的才是最像的答案。全程只读。
+    """
+    import struct
+    from d2h.acquire import process as proc
+
+    start = cb + lo
+    size = hi - lo
+    n = size // 4
+    fmt = f"<{n}I"
+    raw0 = proc.read_bytes(handle, start, size)
+    if raw0 is None or len(raw0) < size:
+        print("采样区间不可读，换个 --range 试试")
+        return 1
+    cur = struct.unpack(fmt, raw0)
+    print(f"采样 0x{start:08X}..0x{start + size:08X}（{n} 个 DWORD），"
+          f"{seconds:.0f} 秒内请把鼠标移到 NPC/怪物/物品上…")
+    seen: dict[int, list] = {}
+    end = time.time() + seconds
+    try:
+        while time.time() < end:
+            time.sleep(interval)
+            raw = proc.read_bytes(handle, start, size)
+            if raw is None or len(raw) < size:
+                continue
+            now = struct.unpack(fmt, raw)
+            checked = 0
+            for i, v in enumerate(now):
+                if v == cur[i] or checked > 200:
+                    continue
+                checked += 1
+                info = _looks_like_unit(handle, v, (start, start + size))
+                if info is None:
+                    continue
+                a = start + i * 4
+                t, txt, uid, x, y = info
+                if a not in seen:
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[{stamp}] 新候选 0x{a:08X} (D2CLIENT+0x{a - cb:X}) -> "
+                          f"0x{v:08X} 类型={t} {UNIT_TYPE_NAME.get(t, '')} "
+                          f"txt={txt} unitId=0x{uid:X} 坐标=({x},{y})")
+                    seen[a] = [0, v, info]
+                seen[a][0] += 1
+                seen[a][1] = v
+                seen[a][2] = info
+            cur = now
+    except KeyboardInterrupt:
+        print("\n提前结束扫描")
+    if not seen:
+        print("未捕获到候选：确认期间鼠标真的悬停在对象上，或扩大 --range / 加长 --seconds")
+        return 0
+    print()
+    print("结束时复检（鼠标停在对象上不动 => 真指针此刻应仍指向同一单位）：")
+    alive = 0
+    for a, (cnt, v, info) in sorted(seen.items()):
+        t, txt, uid, x, y = info
+        mark = ""
+        if proc.read_uint(handle, a, 4) == v:
+            alive += 1
+            mark = "   <== 仍指向同一单位，最像悬停指针"
+        print(f"  0x{a:08X} D2CLIENT+0x{a - cb:X} 变动{cnt}次 最新=0x{v:08X} "
+              f"类型={t} {UNIT_TYPE_NAME.get(t, '')} txt={txt} unitId=0x{uid:X} "
+              f"坐标=({x},{y}){mark}")
+    if not alive:
+        print("  没有候选在结束时保持不变 —— 多半全是噪声，重跑时把鼠标停在对象上别动")
+    return 0
+
+
 def cmd_hover(args) -> int:
-    """读取鼠标当前指向的单位（UnitAny），只读。"""
+    """读取鼠标当前指向的单位（UnitAny），只读。--watch 可持续监听。"""
     from d2h.acquire import offsets as off
     from d2h.acquire import process as proc
-    from d2h.acquire import structs as st
 
     exe, pid = proc.find_target_pid(args.target)
     if pid is None:
@@ -557,30 +718,43 @@ def cmd_hover(args) -> int:
     except OSError as e:
         LOGGER.error("打开进程失败: %s", e)
         return 1
+    watch = getattr(args, "watch", False)
+    interval = getattr(args, "interval", 0.5) or 0.5
     try:
         bases = off.collect_module_bases(handle)
         cb = bases.get("D2CLIENT")
         if not cb:
             print("D2CLIENT 模块不可读")
             return 1
-        rel = off.VARS["D2CLIENT"]["SelectedUnit"] - off.DLLBASE["D2CLIENT"]
-        addr = cb + rel
-        p = proc.read_uint(handle, addr, 4)
-        print(f"PID={pid}  SelectedUnit @0x{addr:08X} = 0x{p:08X}" if p else
-              f"PID={pid}  SelectedUnit @0x{addr:08X} = 0（当前没有指向对象）")
-        if not p:
-            return 0
-        u = proc.read_struct(handle, p, st.UnitAny)
-        tname = UNIT_TYPE_NAME.get(u.dwUnitType, f"未知({u.dwUnitType})")
-        print(f"  类型={u.dwUnitType} {tname}  txtFileNo={u.dwTxtFileNo}  unitId=0x{u.dwUnitId:X}")
-        if u.pPath:
-            x = proc.read_uint(handle, u.pPath + 0x02, 2)
-            y = proc.read_uint(handle, u.pPath + 0x06, 2)
-            print(f"  坐标=({x}, {y})")
-        if u.dwUnitType == 0 and u.pUnitData:
-            raw = proc.read_bytes(handle, u.pUnitData, 16) or b""
-            name = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
-            print(f"  玩家名={name}")
+        if getattr(args, "scan", False):
+            lo, hi = args.range
+            return _scan_hover_unit(handle, cb, getattr(args, "seconds", 30.0),
+                                    interval, lo, hi)
+        # CurrentViewItem = hackmap d2ptrs.h 里唯一的 "当前查看/悬停对象" UnitAny*
+        addr = cb + (off.VARS["D2CLIENT"]["CurrentViewItem"] - off.DLLBASE["D2CLIENT"])
+        faddr = cb + (off.VARS["D2CLIENT"]["SelectedUnitFlag"] - off.DLLBASE["D2CLIENT"])
+        last = None
+        rc = 0
+        while True:
+            p = proc.read_uint(handle, addr, 4)
+            flag = proc.read_uint(handle, faddr, 4)
+            key = (p, flag)
+            if key != last:
+                stamp = datetime.now().strftime("%H:%M:%S")
+                head = f"[{stamp}] CurrentViewItem @0x{addr:08X} = 0x{p:08X}" \
+                       f"   (选中标志={flag})"
+                print(head)
+                if not p:
+                    print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
+                else:
+                    _dump_hover(handle, p)
+                last = key
+            if not watch:
+                break
+            time.sleep(interval)
+        return rc
+    except KeyboardInterrupt:
+        print("\n已停止监听")
         return 0
     finally:
         proc.close(handle)
@@ -782,6 +956,10 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("13", "查看游戏内 UI 面板（一次性读数）", ["ui"]),
     ("14", "向游戏投递按键（i/q/c/t/esc，仅窗口消息不写内存）", None),
     ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数）", ["hover"]),
+    ("16", "鼠标指向对象监听（0.5 秒轮询，指向变化才输出，Ctrl+C 结束）",
+     ["hover", "--watch"]),
+    ("17", "定位鼠标指向指针（差异扫描 30 秒：期间把鼠标移到 NPC/物品上并停住）",
+     ["hover", "--scan"]),
     ("q", "退出", None),
 ]
 
@@ -998,6 +1176,27 @@ def build_parser() -> argparse.ArgumentParser:
         default="loader",
         choices=list(process_targets()),
         help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
+    hp.add_argument(
+        "--watch", action="store_true",
+        help="持续监听，只在指向对象变化时打印（Ctrl+C 退出）",
+    )
+    hp.add_argument(
+        "--interval", type=float, default=0.5,
+        help="--watch / --scan 的轮询间隔秒数（默认 0.5）",
+    )
+    hp.add_argument(
+        "--scan", action="store_true",
+        help="差异扫描：持续采样并找出变成 UnitAny 指针的全局地址（需同时把鼠标移到对象上）",
+    )
+    hp.add_argument(
+        "--seconds", type=float, default=30.0,
+        help="--scan 的扫描时长秒数（默认 30）",
+    )
+    hp.add_argument(
+        "--range", nargs=2, default=[0x100000, 0x130000],
+        type=lambda s: int(s, 0), metavar=("LO", "HI"),
+        help="--scan 的采样区间（相对 D2CLIENT 基址，默认 0x100000 0x130000）",
     )
     skp = sub.add_parser("send", help="向游戏窗口投递按键（PostMessage，不写内存；仅供开发验证）")
     skp.add_argument("key", help="按键名: i/q/c/t/esc/enter/space，或单字符、0xNN 虚拟键码")
