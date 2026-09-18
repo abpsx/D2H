@@ -178,6 +178,7 @@ def read_ui_panels(handle: int, bases: dict[str, int]) -> dict:
     """
     out: dict = {
         "base": None,
+        "array": None,
         "panels": {},
         "open": [],
         "side": None,
@@ -192,9 +193,11 @@ def read_ui_panels(handle: int, bases: dict[str, int]) -> dict:
     if not p:
         return out
     out["base"] = p
+    arr = p + off.UI_ARRAY_DELTA  # UIVar 数组起点（= p - 4）
+    out["array"] = arr
 
     for o, name, side in off.UI_PANELS:
-        v = proc.read_uint(handle, p + o, 4)
+        v = proc.read_uint(handle, arr + o, 4)
         out["panels"][name] = v
         if v == 1:
             out["open"].append(f"{name}({side})" if side != "-" else name)

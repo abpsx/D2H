@@ -560,12 +560,16 @@ def cmd_ui(args) -> int:
         ing, desc = gm.classify_state(code)
         ui = gm.read_ui_panels(handle, bases)
         print(f"PID={pid}  状态={code} ({desc})")
-        print(f"UI 块基址 p=0x{ui['base']:08X}" if ui["base"] else "UI 块不可读（未在游戏中的常见表现）")
+        if ui["base"]:
+            print(f"*(D2CLIENT+0x50D00) = 0x{ui['base']:08X}   UIVar 数组起点 = 0x{ui['array']:08X}")
+        else:
+            print("UI 块不可读（未在游戏中的常见表现）")
         for o, name, side in off.UI_PANELS:
             v = ui["panels"].get(name)
             mark = "开" if v == 1 else ("关" if v == 0 else f"?({v})")
             key = off.UI_PANEL_KEYS.get(name, "")
-            print(f"  +{o:02X}  {name:<8} 侧={side}  键={key:<11} {mark}")
+            hm = off.UI_PANEL_HM.get(o // 4, "")
+            print(f"  +{o:02X} [{o // 4:>2}] {name:<14} 侧={side} 键={key:<11} {hm:<12} {mark}")
         print(f"  左右位(D2CLIENT+0x11C414) = {ui['side']} ({ui['side_desc']})")
         print(f"  仓库位(D2CLIENT+0x11BC34) = {ui['stash']} ({ui['stash_desc']})")
         return 0 if ing else 2

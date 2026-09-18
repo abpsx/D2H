@@ -73,52 +73,95 @@ STATE_IN_BN_GAME = (2000, 2999)      # 战网游戏内
 STATE_IN_SP_GAME = (3000, 3999)      # 单机游戏内
 STATE_LOBBY_MAX = 999                # < 1000 视为登录界面/不在游戏（如 11）
 
-# ---- 游戏内 UI 面板标记（多级指针；1.13c 实测自真实游戏）----
-# 真源: p = *( D2CLIENT.dll + 0x50D00 )   —— 必须先解引用！
-#       标志在 p + off，每项 4 字节 DWORD。不解引用会读到九位数垃圾。
-# 实测(2026-09-19, pid 10872)：I→+0x00=1, c→+0x04=1, t→+0x0C=1, q→+0x38=1,
-#   无 UI 时 ESC→+0x20=1（设置），有 UI 时 ESC 关闭当前面板。
+# ---- 游戏内 UI 标志数组（多级指针；1.13c 实测 + 参考项目 hackmap 对照）----
+# 真源: p = *( D2CLIENT.dll + 0x50D00 )   —— 必须先解引用，不解引用会读到九位数垃圾。
+#   实测 p = 0x6FBAAD84；**UIVar 数组起点 = p - 4 = 0x6FBAAD80**。
+#
+# ★★★ 与参考项目 hackmap `d2vars.h` 的 `enum UIVar` 完全对齐 ★★★
+#   数组 = 38 个 DWORD（index 0..37），偏移 = index*4，范围 0x6FBAAD80 ~ 0x6FBAAE14（含）。
+#   钉死基址的硬证据（2026-09-19 dump 实测，pid 10872）：
+#     index  0 = 1  ← hackmap 注释 "UIVAR_UNK0 ... always 1"
+#     index 19 = 1  ← hackmap 注释 "UIVAR_UNK19 ... init 1"
+#     index 10 = 0x6FBAADA8 ← hackmap d2ptrs.h 里点名的全局变量 AutomapOn（小地图开关）
+#     数组前 8 个 DWORD 全 0，index 38 起是垃圾值（越界）→ 数组长度正好 38 项。
+#   ⚠️ 早期版本把 p 当数组起点，导致**全部偏移少 4**（整体错位一格），现已修正。
 UI_PANEL_CHAIN: dict = {
     "module": "D2CLIENT",
     "offset": 0x50D00,
 }
-# (偏移, 名称, 停靠侧) —— 侧用于解读 UI_SIDE_FLAG；键见 UI_PANEL_KEYS
-# 绝对地址（默认基址 0x6FAB0000 下）= 0x6FBAAD84 + 偏移，例如
-#   +0x24 = 0x6FBAADA8 正是已知全局 AutomapOn —— 说明它们同属一个全局 UI 结构。
+# UIVar 数组起点 = 解引用值 + UI_ARRAY_DELTA（即 p - 4）
+UI_ARRAY_DELTA: int = -0x04
+
+# (偏移, 名称, 停靠侧) —— 偏移相对**数组起点**；侧用于解读 UI_SIDE_FLAG；键见 UI_PANEL_KEYS
+# 状态标记：[V]=按键实测通过  [U]=用户已核验  [?]=未辨明（只有 hackmap 命名，未实测）
 UI_PANELS: list[tuple[int, str, str]] = [
-    (0x00, "背包", "右"),
-    (0x04, "属性", "左"),
-    (0x08, "技能组", "-"),     # 注意：不是技能树
-    (0x0C, "技能树", "右"),   # 注意：不是 +0x08
-    (0x1C, "NPC对话框", "-"),  # 0x6FBAADA0
-    (0x20, "设置", "-"),
-    (0x24, "地图", "-"),          # 0x6FBAADA8 = 已知全局 AutomapOn（佐证同属一块）[用户已核验]
-    (0x2C, "商店", "-"),       # 0x6FBAADB0
-    (0x34, "任务物品提交窗", "-"),  # 0x6FBAADB8
-    (0x38, "任务", "左"),
-    (0x4C, "传送", "-"),       # 0x6FBAADD0
-    (0x50, "迷你标签栏", "-"),   # 0x6FBAADD4 [用户已核验]
-    (0x54, "组队信息", "-"),   # 0x6FBAADD8 按键 P
-    (0x5C, "信息页", "-"),
-    (0x60, "仓库", "左"),
-    (0x64, "盒子", "左"),
-    (0x8C, "佣兵装备", "-"),   # 0x6FBAAE10 按键 O
+    (0x00, "数组头(恒1)", "-"),      # [V] UNK0      always 1
+    (0x04, "背包", "右"),            # [V] INVENTORY 键 I
+    (0x08, "属性", "左"),            # [V] STATS     键 C
+    (0x0C, "技能组(左右手)", "-"),    # [U] CURRSKILL 左右手技能选择（不是技能树）
+    (0x10, "技能树", "右"),          # [V] SKILLS    键 T
+    (0x14, "聊天输入", "-"),         # [?] CHATINPUT 键 ENTER
+    (0x18, "新属性点按钮", "-"),      # [?] NEWSTATS  （当前=1，疑"有未分配属性点"）
+    (0x1C, "新技能点按钮", "-"),      # [?] NEWSKILL  （当前=1，疑"有未分配技能点"）
+    (0x20, "NPC对话框", "-"),        # [U] INTERACT
+    (0x24, "设置", "-"),             # [V] GAMEMENU  无 UI 时按 ESC 打开
+    (0x28, "地图", "-"),             # [U] AUTOMAP   = 全局 AutomapOn，键 TAB
+    (0x2C, "配置快捷键", "-"),        # [?] CFGCTRLS
+    (0x30, "商店(NPC交易)", "-"),     # [U] NPCTRADE
+    (0x34, "显地面物品", "-"),        # [?] SHOWITEMS 键 ALT
+    (0x38, "打孔/注入窗", "-"),       # [U] MODITEM   （用户原称"任务物品提交窗"）
+    (0x3C, "任务", "左"),            # [V] QUEST     键 Q
+    (0x40, "UNK16", "-"),            # [?]
+    (0x44, "任务日志按钮", "-"),      # [?] NEWQUEST  左下角任务日志按钮
+    (0x48, "下方面板", "-"),          # [?] STATUSAREA 置位时下部面板不重绘
+    (0x4C, "UNK19(初值1)", "-"),      # [V] UNK19     dump 实测 =1
+    (0x50, "传送", "-"),             # [U] WAYPOINT
+    (0x54, "迷你标签栏", "-"),        # [U] MINIPANEL
+    (0x58, "组队", "-"),             # [V] PARTY     键 P
+    (0x5C, "玩家交易", "-"),          # [?] PPLTRADE
+    (0x60, "信息页(消息日志)", "-"),   # [U] MSGLOG
+    (0x64, "仓库", "左"),            # [V] STASH
+    (0x68, "盒子", "左"),            # [U] CUBE
+    (0x6C, "UNK27", "-"),            # [?]
+    (0x70, "背包2", "-"),            # [?] INVENTORY2
+    (0x74, "背包3", "-"),            # [?] INVENTORY3
+    (0x78, "背包4", "-"),            # [?] INVENTORY4
+    (0x7C, "腰带", "-"),             # [?] BELT
+    (0x80, "UNK32", "-"),            # [?]
+    (0x84, "帮助", "-"),             # [?] HELP      键 H
+    (0x88, "UNK34", "-"),            # [?]
+    (0x8C, "队头像", "-"),            # [?] PARTYHEAD （当前=1）
+    (0x90, "佣兵装备", "-"),          # [V] PET       键 O
+    (0x94, "任务卷轴", "-"),          # [?] QUESTSCROLL 点击任务物品时显示任务信息
 ]
 
-# 面板 -> 默认热键（仅用于提示与自动化验证；无按键的面板需鼠标触发，如仓库/盒子/商店）
-# 实测状态（2026-09-19，pid 10872）：
-#   已验证：背包(I) 属性(C) 技能树(T) 任务(Q) 设置(ESC) 仓库 组队信息(P) 佣兵装备(O)
-#   用户已核验：地图(+0x24) 迷你标签栏(+0x50)
-#   待验证：技能组(+0x08，按 W 无反应，含义待定) NPC对话框 商店 任务物品提交窗 传送
-#           信息页 盒子（需鼠标右键开启，无法用按键触发）
+# index -> hackmap `enum UIVar` 名字（便于回查参考项目源码里的用法）
+UI_PANEL_HM: dict[int, str] = {
+    0: "UNK0", 1: "INVENTORY", 2: "STATS", 3: "CURRSKILL", 4: "SKILLS",
+    5: "CHATINPUT", 6: "NEWSTATS", 7: "NEWSKILL", 8: "INTERACT",
+    9: "GAMEMENU", 10: "AUTOMAP", 11: "CFGCTRLS", 12: "NPCTRADE",
+    13: "SHOWITEMS", 14: "MODITEM", 15: "QUEST", 16: "UNK16",
+    17: "NEWQUEST", 18: "STATUSAREA", 19: "UNK19", 20: "WAYPOINT",
+    21: "MINIPANEL", 22: "PARTY", 23: "PPLTRADE", 24: "MSGLOG",
+    25: "STASH", 26: "CUBE", 27: "UNK27", 28: "INVENTORY2",
+    29: "INVENTORY3", 30: "INVENTORY4", 31: "BELT", 32: "UNK32",
+    33: "HELP", 34: "UNK34", 35: "PARTYHEAD", 36: "PET",
+    37: "QUESTSCROLL",
+}
+
+# 面板 -> 默认热键（提示与自动化验证用；无按键的面板需鼠标/NPC 触发，如仓库/盒子/商店）
 UI_PANEL_KEYS: dict[str, str] = {
     "背包": "I",
     "属性": "C",
     "技能树": "T",
     "任务": "Q",
-    "组队信息": "P",
+    "组队": "P",
     "佣兵装备": "O",
     "设置": "ESC(无 UI 时)",
+    "地图": "TAB",
+    "显地面物品": "ALT",
+    "聊天输入": "ENTER",
+    "帮助": "H",
 }
 
 # 关联聚合位 A：D2CLIENT.dll + 0x11C414 —— 实测与上面面板联动（同源 UI 系统）
