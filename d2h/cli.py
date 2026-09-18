@@ -152,7 +152,7 @@ def cmd_state(args) -> int:
     exe, pid = proc.find_target_pid(args.target)
     if pid is None:
         msg = f"process not found: {exe}"
-        LOGGER.error("✗ %s", msg)
+        LOGGER.error("[FAIL] %s", msg)
         print(msg)
         return 1
     LOGGER.info("找到 %s, PID=%s", exe, pid)
@@ -207,11 +207,11 @@ def cmd_find(args) -> int:
     exe, pid = proc.find_target_pid(args.target)
     if pid is None:
         msg = f"process not found: {exe}"
-        LOGGER.error("✗ %s", msg)
+        LOGGER.error("[FAIL] %s", msg)
         print(msg)  # 直接打印，确保 bat 控制台可见（不受日志级别影响）
         return 1
     msg = f"game PID: {pid}  (target: {exe})"
-    LOGGER.info("✓ 找到 %s, PID=%s", exe, pid)
+    LOGGER.info("[OK] 找到 %s, PID=%s", exe, pid)
     print(msg)
     return 0
 
@@ -230,7 +230,7 @@ def cmd_items(args) -> int:
     exe, pid = proc.find_target_pid(args.target)
     if pid is None:
         msg = f"process not found: {exe}"
-        LOGGER.error("✗ %s", msg)
+        LOGGER.error("[FAIL] %s", msg)
         print(msg)
         return 1
     LOGGER.info("找到 %s, PID=%s", exe, pid)
@@ -344,7 +344,7 @@ def cmd_probe(args) -> int:
     exe, pid = proc.find_target_pid(args.target)
     if pid is None:
         msg = f"process not found: {exe}"
-        LOGGER.error("✗ %s", msg)
+        LOGGER.error("[FAIL] %s", msg)
         print(msg)
         return 1
     try:
@@ -492,6 +492,92 @@ def cmd_parse(args) -> int:
     return 0
 
 
+def cmd_watch(args) -> int:
+    """变动监听（只读）：按 interval 轮询指针链，**仅在值变动时**向窗口输出一行。
+
+    默认监听游戏状态码链 FOG+0x4AFE0,+0x8，间隔 0.3 秒；Ctrl+C 退出。
+    """
+    import time
+
+    from d2h.acquire import process as proc
+    from d2h.acquire import offsets as off
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("[FAIL] %s", msg)
+        print(msg)
+        return 1
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+
+    bases = off.collect_module_bases(handle)
+    mod, off0, rest = _parse_chain(args.chain)
+    if mod:
+        if mod not in bases:
+            print(f"module not loaded: {mod}  (已加载: {', '.join(sorted(bases))})")
+            proc.close(handle)
+            return 1
+        base = bases[mod]
+    else:
+        base = 0
+    offs = [off0] + rest
+
+    def meaning(v: int | None) -> str:
+        if v is None:
+            return "不可读"
+        if v < 10000:  # 小值才当状态码解读
+            try:
+                from d2h.acquire import game as _gm
+
+                _ing, desc = _gm.classify_state(v)
+                return desc
+            except Exception:  # noqa: BLE001
+                return ""
+        return ""
+
+    def label(v: int | None) -> str:
+        """把状态码渲染成 '界面名(码)'；非状态码则直接给数值。"""
+        if v is None:
+            return "不可读"
+        m = meaning(v)
+        return f"{m}({v})" if m else str(v)
+
+    print(
+        f"监听界面标记: {args.chain}  PID={pid}  间隔={args.interval}s  "
+        f"仅在界面切换时输出（Ctrl+C 退出）"
+    )
+    LOGGER.info("watch 启动: %s PID=%s interval=%s", args.chain, pid, args.interval)
+
+    last: int | None = None
+    changes = 0
+    n = 0
+    try:
+        while True:
+            if args.count and n >= args.count:
+                break
+            n += 1
+            _trace, _addr, val = _eval_chain(handle, base, offs)
+            if val != last:
+                ts = time.strftime("%H:%M:%S")
+                m = meaning(val)
+                extra = f"  [{m}]" if m else ""
+                print(f"[{ts}] {label(last)} -> {label(val)}", flush=True)
+                LOGGER.info("watch 变动: %s -> %s%s", last, val, extra)
+                last = val
+                changes += 1
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\n已停止。")
+    finally:
+        proc.close(handle)
+    print(f"采样 {n} 次，变动 {changes} 次。")
+    return 0
+
+
 def _dispatch(argv: list[str]) -> int:
     """按 argv 执行一次子命令（菜单内部复用，避免反复启动 Python）。"""
     args = build_parser().parse_args(argv)
@@ -505,6 +591,8 @@ def _dispatch(argv: list[str]) -> int:
         "list": cmd_list,
         "tmp": cmd_tmp,
         "parse": cmd_parse,
+        "menu": cmd_menu,
+        "watch": cmd_watch,
     }
     fn = table.get(args.cmd)
     return fn(args) if fn is not None else 0
@@ -523,6 +611,7 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
      ["probe", "FOG+0x4AFE0,+0x8", "--loop", "--interval", "3", "--dump", "0", "--scan", "0"]),
     ("9", "查看临时目录", ["tmp"]),
     ("10", "清空临时目录", ["tmp", "--clean"]),
+    ("11", "界面标记监听（0.3 秒轮询，界面切换才输出，Ctrl+C 结束）", ["watch"]),
     ("q", "退出", None),
 ]
 
@@ -593,7 +682,7 @@ def cmd_menu(args) -> int:
             print(f"  {key:>2}. {desc}")
         print("==========================================")
         try:
-            choice = input("请选择 [1-10/q]: ").strip().lower()
+            choice = input("请选择 [1-11/q]: ").strip().lower()
         except EOFError:
             print("(输入结束，退出)")
             return 0
@@ -614,8 +703,8 @@ def cmd_menu(args) -> int:
         print()
         try:
             _dispatch(argv)
-        except SystemExit:
-            pass
+        except (KeyboardInterrupt, SystemExit):
+            print("\n(已中断，返回菜单)")
         except Exception as e:  # noqa: BLE001  菜单不因单条命令失败而退出
             LOGGER.exception("执行出错: %s", e)
         try:
@@ -686,6 +775,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("list", help="列出本地快照")
     sub.add_parser("menu", help="交互式中文菜单（run.bat 无参数时默认进入）")
+    wp = sub.add_parser(
+        "watch", help="界面标记监听：按间隔轮询状态码，仅在界面切换时输出（默认 0.3s）"
+    )
+    wp.add_argument("--chain", default="FOG+0x4AFE0,+0x8", help="指针链（默认界面标记链）")
+    wp.add_argument("--interval", type=float, default=0.3, help="轮询间隔秒（默认 0.3）")
+    wp.add_argument("--count", type=int, default=0, help="采样次数上限，0=不限（默认）")
+    wp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     tp = sub.add_parser("tmp", help="查看/清理项目内临时目录（禁写 C 盘 %TEMP%）")
     tp.add_argument("--clean", action="store_true", help="清空 temp/")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
@@ -719,6 +820,8 @@ def main(argv=None) -> int:
             return cmd_probe(args)
         if args.cmd == "menu":
             return cmd_menu(args)
+        if args.cmd == "watch":
+            return cmd_watch(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "tmp":
