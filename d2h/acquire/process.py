@@ -156,24 +156,30 @@ def read_uint(handle: int, address: int, width: int = 4) -> int | None:
 def get_module_info(handle: int, module_name: str = "game.exe"):
     """返回 (base_address, size_of_image)，找不到返回 None。"""
     psm = ctypes.windll.psapi
-    psm.EnumProcessModules.argtypes = [
-        wt.HANDLE,
-        ctypes.POINTER(wt.HMODULE),
-        wt.DWORD,
-        ctypes.POINTER(wt.DWORD),
-    ]
-    psm.EnumProcessModules.restype = wt.BOOL
     psm.GetModuleInformation.argtypes = [wt.HANDLE, wt.HMODULE, ctypes.c_void_p, wt.DWORD]
     psm.GetModuleInformation.restype = wt.BOOL
     psm.GetModuleFileNameExW.argtypes = [wt.HANDLE, wt.HMODULE, wt.LPWSTR, wt.DWORD]
     psm.GetModuleFileNameExW.restype = wt.DWORD
 
-    max_mods = 1024
-    modules = (wt.HMODULE * max_mods)()
-    needed = wt.DWORD(0)
-    if not psm.EnumProcessModules(handle, modules, ctypes.sizeof(modules), ctypes.byref(needed)):
-        return None
-    count = needed.value // ctypes.sizeof(wt.HMODULE)
+    target = module_name.lower()
+    for name, base, size in _enum_modules_raw(handle):
+        if name.lower().endswith(target):
+            return (base, size)
+    return None
+
+
+# LIST_MODULES_* 标志（用于 64 位宿主读取 32 位 WOW64 目标）
+_LIST_MODULES_32BIT = 0x01
+_LIST_MODULES_64BIT = 0x02
+_LIST_MODULES_ALL = 0x03
+
+
+def _enum_modules_raw(handle: int) -> list[tuple[str, int, int]]:
+    """底层模块枚举；优先用 EnumProcessModulesEx 取 32 位模块（D2 是 32 位进程），
+    失败回退到 EnumProcessModules。返回 [(name, base, size), ...]。"""
+    import os
+
+    psm = ctypes.windll.psapi
 
     class MODULEINFO(ctypes.Structure):
         _fields_ = [
@@ -182,16 +188,65 @@ def get_module_info(handle: int, module_name: str = "game.exe"):
             ("EntryPoint", ctypes.c_void_p),
         ]
 
-    target = module_name.lower()
+    max_mods = 1024
+    modules = (wt.HMODULE * max_mods)()
+    needed = wt.DWORD(0)
+
+    used_ex = False
+    if hasattr(psm, "EnumProcessModulesEx"):
+        psm.EnumProcessModulesEx.argtypes = [
+            wt.HANDLE,
+            ctypes.POINTER(wt.HMODULE),
+            wt.DWORD,
+            ctypes.POINTER(wt.DWORD),
+            wt.DWORD,
+        ]
+        psm.EnumProcessModulesEx.restype = wt.BOOL
+        ok = psm.EnumProcessModulesEx(
+            handle, modules, ctypes.sizeof(modules), ctypes.byref(needed), _LIST_MODULES_32BIT
+        )
+        used_ex = bool(ok)
+    if not used_ex:
+        psm.EnumProcessModules.argtypes = [
+            wt.HANDLE,
+            ctypes.POINTER(wt.HMODULE),
+            wt.DWORD,
+            ctypes.POINTER(wt.DWORD),
+        ]
+        psm.EnumProcessModules.restype = wt.BOOL
+        ok = psm.EnumProcessModules(handle, modules, ctypes.sizeof(modules), ctypes.byref(needed))
+    if not ok:
+        return []
+
+    count = needed.value // ctypes.sizeof(wt.HMODULE)
+    out: list[tuple[str, int, int]] = []
     for i in range(count):
         mi = MODULEINFO()
         if not psm.GetModuleInformation(handle, modules[i], ctypes.byref(mi), ctypes.sizeof(mi)):
             continue
         name_buf = ctypes.create_unicode_buffer(260)
         psm.GetModuleFileNameExW(handle, modules[i], name_buf, 260)
-        if name_buf.value.lower().endswith(target):
-            return (int(mi.lpBaseOfDll or 0), int(mi.SizeOfImage))
-    return None
+        out.append(
+            (os.path.basename(name_buf.value), int(mi.lpBaseOfDll or 0), int(mi.SizeOfImage))
+        )
+    return out
+
+
+def enum_modules(handle: int, max_mods: int = 1024):
+    """枚举进程模块（优先 32 位），返回 [(name, base, size_of_image), ...]。"""
+    return _enum_modules_raw(handle)
+
+
+def read_struct(handle: int, address: int, struct_cls):
+    """从进程内存读取一个 ctypes.Structure 实例；失败返回 None。"""
+    size = ctypes.sizeof(struct_cls)
+    data = read_bytes(handle, address, size)
+    if data is None:
+        return None
+    try:
+        return struct_cls.from_buffer_copy(data)
+    except ValueError:
+        return None
 
 
 # 可读保护位（只取能读的，避开不可访问区域）

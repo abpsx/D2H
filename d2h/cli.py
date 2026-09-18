@@ -55,7 +55,7 @@ def cmd_info(args) -> int:
     LOGGER.info("默认目标进程: D2loader.exe (loader) | 备选: game.exe")
     LOGGER.info("内存约束: 只读 / 禁止写入 / 允许快照")
     LOGGER.info("运行平台: Windows | 入口: d2h/cli.py (run.bat 唤起)")
-    LOGGER.info("子命令: info | find [--target]| snap [--target] | list | parse <快照名>")
+    LOGGER.info("子命令: info | find [--target] | snap [--target] | state [--target] | list | parse <快照名>")
     LOGGER.info("无游戏时 info/find/list/parse 可离线运行；snap 需游戏在线")
     return 0
 
@@ -108,6 +108,59 @@ def cmd_list(args) -> int:
             s.get("region_count"),
             s.get("module_bytes"),
         )
+    return 0
+
+
+def cmd_state(args) -> int:
+    """读取游戏状态（仅只读）：InGame / GameInfo / 本地玩家 / 背包物品枚举。"""
+    from d2h.acquire import process as proc
+    from d2h.acquire import offsets as off
+    from d2h.acquire import game as gm
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        msg = f"process not found: {exe}"
+        LOGGER.error("✗ %s", msg)
+        print(msg)
+        return 1
+    LOGGER.info("找到 %s, PID=%s", exe, pid)
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+    try:
+        bases = off.collect_module_bases(handle)
+        LOGGER.info("已加载模块基址: %s", ", ".join(f"{k}=0x{v:X}" for k, v in bases.items()))
+        if "D2CLIENT" not in bases:
+            LOGGER.error("未找到 D2Client.dll，无法解析游戏状态（确认游戏已进游戏界面？）")
+            return 1
+        state = gm.read_state(handle, bases)
+    finally:
+        proc.close(handle)
+
+    # 控制台直接打印结构化结果（bat 可见）
+    print("=== D2H 游戏状态 (只读) ===")
+    print(f"  InGame       : {state.get('in_game')}")
+    print(f"  AutomapOn    : {state.get('automap_on')}")
+    print(f"  CharName     : {state.get('char_name')}")
+    print(f"  PlayerName   : {state.get('player_name')}")
+    print(f"  GameName     : {state.get('game_name')}")
+    print(f"  Realm        : {state.get('realm')}")
+    print(f"  Account      : {state.get('account')}")
+    print(f"  GameMode     : 0x{state.get('game_mode', 0) or 0:02X}")
+    print(f"  PlayerUnitId : {state.get('player_unit_id')}")
+    print(f"  Position     : ({state.get('pos_x')}, {state.get('pos_y')})")
+    print(f"  InvItems     : {state.get('inventory_count')}")
+    for i, it in enumerate(state.get("inventory_sample", [])):
+        print(
+            f"    [{i}] type={it['type']} quality={it['quality']} "
+            f"ilvl={it['ilvl']} loc={it['location']} body={it['body']} "
+            f"flags=0x{it['flags']:X}"
+        )
+    # 同时写入日志（落盘）
+    LOGGER.info("状态读取完成: %s", {k: v for k, v in state.items() if k != "inventory_sample"})
+    LOGGER.info("背包物品(样本): %s", state.get("inventory_sample"))
     return 0
 
 
@@ -173,6 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(process_targets()),
         help="目标类型: loader=D2loader.exe / game=game.exe",
     )
+    stp = sub.add_parser("state", help="读取游戏状态（InGame/GameInfo/玩家/背包，需游戏在线）")
+    stp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     sub.add_parser("list", help="列出本地快照")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
     pp.add_argument("name", help="快照名")
@@ -197,6 +257,8 @@ def main(argv=None) -> int:
             return cmd_find(args)
         if args.cmd == "snap":
             return cmd_snap(args)
+        if args.cmd == "state":
+            return cmd_state(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "parse":

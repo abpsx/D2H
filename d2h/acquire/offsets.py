@@ -1,23 +1,301 @@
-"""1.13c 偏移表（占位，待 M1 校准）。
+"""D2 1.13c 偏移表（只读观测用）。
 
-对应参考 d2ptrs.h / d2structs.h。运行时以快照为基准校准，不盲目硬编码。
-当前仅支持 1.13c（见规范 §2.4）。
+数据全部搬运自参考项目 d2hackmap 的 d2ptrs.h / d2vars.h / d2structs.h，
+遵循规范 §13「参考项目最优先：偏移 / 结构体直接复用」。
+
+重要约定（见规范 §2.1 内存只读约束）：
+- 本文件**只持有地址常量**，不提供任何写内存能力。
+- 下列 VARS/FUNCTIONS 中每个地址都是「DLL 默认基址下的 1.13c 绝对地址」。
+  d2hackmap 用 D2*PTR2 宏的**第一个参数**表示 1.13c（第二个是 1.13d）。
+- 运行时必须结合进程的**真实模块基址**换算（resolve()），不能硬套 DLLBASE，
+  因为部分 DLL（如 D2Game / D2Lang）会被重定位。详见 resolve()。
+- FUNCTIONS 是函数入口点（需远程调用，超出只读范畴），仅作参考存档，
+  解析层只读 VARS（全局状态指针）即可拿到游戏状态。
 """
 
 from __future__ import annotations
 
-TARGET_VERSION = "1.13c"
+from d2h.acquire import process as proc
 
-# 待 M1 实测填写：GameData 等指针/偏移。
-# 示例结构（不要照抄，需以快照校准）：
-# OFFSETS_113C = {
-#     "GameData": 0x...,   # game.exe 内 GameData 指针地址（或偏移路径）
-# }
-OFFSETS_113C: dict = {}
+# ---- DLL 默认基址（用于把绝对地址换算成相对偏移；运行时以真实基址为准）----
+DLLBASE: dict[str, int] = {
+    "D2CLIENT": 0x6FAB0000,
+    "D2COMMON": 0x6FD50000,
+    "D2GFX": 0x6FA80000,
+    "D2WIN": 0x6F8E0000,
+    "D2LANG": 0x6FC00000,
+    "D2CMP": 0x6FE10000,
+    "D2MULTI": 0x6F9D0000,
+    "BNCLIENT": 0x6FF20000,
+    "D2NET": 0x6FBF0000,
+    "STORM": 0x6FFB0000,
+    "FOG": 0x6FF50000,
+    "D2GAME": 0x6FC20000,
+    "D2LAUNCH": 0x6FA40000,
+    "D2MCPCLIENT": 0x6FA20000,
+}
+
+# 逻辑名 -> 进程内模块文件名（用于 get_module_info 取真实基址）
+MODULE_FILE: dict[str, str] = {
+    "D2CLIENT": "D2Client.dll",
+    "D2COMMON": "D2Common.dll",
+    "D2GFX": "D2gfx.dll",
+    "D2WIN": "D2Win.dll",
+    "D2LANG": "D2Lang.dll",
+    "D2CMP": "D2CMP.dll",
+    "D2MULTI": "D2Multi.dll",
+    "BNCLIENT": "BNClient.dll",
+    "D2NET": "D2Net.dll",
+    "STORM": "Storm.dll",
+    "FOG": "Fog.dll",
+    "D2GAME": "D2Game.dll",
+    "D2LAUNCH": "d2launch.dll",
+    "D2MCPCLIENT": "D2MCPClient.dll",
+}
+
+# ---- 1.13c 全局变量指针（VARS[dll][name] = 默认基址下的绝对地址）----
+# 来源：d2ptrs.h 中 D2VARPTR / D2VARPTR2 的「第一个参数」（即 1.13c 地址）。
+VARS: dict[str, dict[str, int]] = {
+    "D2CLIENT": {
+        "AutomapLayerList": 0x6FBCC1C0,
+        "AutomapLayer": 0x6FBCC1C4,
+        "PlayerUnit": 0x6FBCBBFC,
+        "RosterUnitList": 0x6FBCBC14,
+        "PetUnitList": 0x6FBCC4D4,
+        "DrlgAct": 0x6FBCC3B8,
+        "Expansion": 0x6FBC9854,
+        "Difficulty": 0x6FBCC390,
+        "GameInfo": 0x6FBCB980,
+        "Fps": 0x6FBCC2AC,
+        "Ping": 0x6FBC9804,
+        "ExitAppFlag": 0x6FBA8C9C,
+        "InGame": 0x6FBCC3A0,
+        "AutomapOn": 0x6FBAADA8,
+        "Divisor": 0x6FBA16B0,
+        "Offset": 0x6FBCC1F8,
+        "AutomapPos": 0x6FBCC1E8,
+        "AutoMapSize": 0x6FBCC230,
+        "MinmapType": 0x6FBCC1B0,
+        "MinimapOffset": 0x6FBCC228,
+        "IsMapShakeOn": 0x6FBCBEFC,
+        "MapShakeY": 0x6FBBB9DC,
+        "MapShakeX": 0x6FBCBF00,
+        "ScreenSizeX": 0x6FB8BC48,
+        "ScreenSizeY": 0x6FB8BC4C,
+        "ScreenSize": 0x6FB8BC48,
+        "DrawOffset": 0x6FBCB9A0,
+        "InfoPositionX": 0x6FBA9E14,
+        "InfoPositionY": 0x6FBCC21C,
+        "QuestData": 0x6FBC973B,
+        "GameQuestData": 0x6FBC973F,
+        "QuestPage": 0x6FBD3395,
+        "MButton": 0x6FBCC3A0,
+        "LastChatMessage": 0x6FBCEC80,
+        "ChatTextLength": 0x6FBCC028,
+        "MousePos": 0x6FBCB824,
+        "LastMousePos": 0x6FB8BC54,
+        "CursorInvGridX": 0x6FB90EB8,
+        "CursorInvGridY": 0x6FB90EBC,
+        "CurrentViewItem": 0x6FBCBC38,
+        "GoldInTranBox": 0x6FBCBBB0,
+        "ShowLifeStr": 0x6FBCC4B0,
+        "ShowManaStr": 0x6FBCC4B4,
+    },
+    "D2COMMON": {
+        "WeaponsTxts": 0x6FDEFBA0,
+        "ArmorTxts": 0x6FDEFBA8,
+        "DataTables": 0x6FDE9E1C,
+        "RuneWords": 0x6FDEFBD4,
+        "RuneWordTxt": 0x6FDEFBD8,
+    },
+    "D2GFX": {
+        "WinState": 0x6FA9D66C,
+    },
+    "D2WIN": {
+        "FocusedControl": 0x6F9014B0,
+    },
+    "D2NET": {
+        "UnkNetFlag": 0x6FBFB244,
+    },
+    "BNCLIENT": {
+        "BnChatMessage": 0x6FF3F64C,
+    },
+    "D2MULTI": {
+        "GameListControl": 0x6FA09CC0,
+        "EditboxPreferences": 0x6F9E9C60,
+    },
+}
+
+# ---- 1.13c 函数入口点（仅参考存档；需远程调用，超出只读范畴）----
+# 来源：d2ptrs.h 中 D2FUNCPTR2 的「第一个参数」。解析层不使用。
+FUNCTIONS: dict[str, dict[str, int]] = {
+    "D2CLIENT": {
+        "ShowGameMessage": 0x6FB2D850,
+        "ShowPartyMessage": 0x6FB2D610,
+        "ShowMap": 0x6FAEB8B0,
+        "RevealAutomapRoom": 0x6FB12580,
+        "GetPlayerXOffset": 0x6FAEF6C0,
+        "GetPlayerYOffset": 0x6FAEF6D0,
+        "SetUiStatus": 0x6FB72790,
+        "GetUnitFromId": 0x6FB55B40,
+        "GetSelectedUnit": 0x6FB01A80,
+        "CheckUiStatusStub": 0x6FB6E400,
+        "ItemProtect": 0x6FAD3200,
+        "DrawClient": 0x6FAD9250,
+        "Storm511": 0x6FABBE84,
+    },
+    "D2COMMON": {
+        "GetObjectTxt": 0x6FD8E980,
+        "GetLevelDefTxt": 0x6FDBCB20,
+        "GetLevelTxt": 0x6FDBCCC0,
+        "GetItemTxt": 0x6FDC19A0,
+        "GetUnitStat": 0x6FD88B70,
+        "GetUnitBaseStat": 0x6FD88C20,
+        "CheckUnitState": 0x6FD83CD0,
+        "GetItemValue": 0x6FD79D60,
+        "GetCursorItem": 0x6FD6DFB0,
+        "GetFirstItemInInv": 0x6FD6E190,
+        "GetNextItemInInv": 0x6FD6E8F0,
+        "GetUnitPosX": 0x6FD84B80,
+        "GetUnitPosY": 0x6FD84BB0,
+    },
+    "D2GFX": {
+        "GetHwnd": 0x6FA87FB0,
+    },
+}
 
 
-def get_offsets(version: str = TARGET_VERSION) -> dict:
-    """返回指定版本的偏移表；当前仅 1.13c。"""
-    if version != TARGET_VERSION:
-        raise ValueError(f"不支持的版本: {version}（当前仅支持 {TARGET_VERSION}）")
-    return OFFSETS_113C
+# ---- 枚举（来自 d2vars.h）----
+class UnitNo:
+    PLAYER = 0
+    MONSTER = 1
+    OBJECT = 2
+    MISSILE = 3
+    ITEM = 4
+    ROOMTILE = 5
+
+
+class ItemQuality:
+    INVALID = 0
+    LOW = 1
+    NORMAL = 2
+    SUPERIOR = 3
+    MAGIC = 4
+    SET = 5
+    RARE = 6
+    UNIQUE = 7
+    CRAFTED = 8
+    TAMPERED = 9
+
+
+# ITEMFLAG_*（dwItemFlags 位掩码）
+class ItemFlag:
+    IDENTIFIED = 0x00000010
+    SOCKETED = 0x00000800
+    ETHEREAL = 0x00400000
+    RUNEWORD = 0x04000000
+
+
+# UIVAR_*（界面编号；细化判断需用 CheckUiStatusStub 函数，此处仅存档）
+class UIVar:
+    INVENTORY = 1
+    STATS = 2
+    SKILLS = 4
+    CHATINPUT = 5
+    GAMEMENU = 9
+    ATUOMAP = 10
+    NPCTRADE = 12
+    SHOWITEMS = 13
+    QUEST = 15
+    WAYPOINT = 20
+    MINIPANEL = 21
+    PARTY = 22
+    STASH = 25
+    CUBE = 26
+    BELT = 31
+    HELP = 33
+    PET = 36
+
+
+# UNIT_STAT_*（属性编号，来自 d2vars.h UnitStat）
+class UnitStat:
+    STRENGTH = 0
+    ENERGY = 1
+    DEXTERITY = 2
+    VITALITY = 3
+    STATPOINTSLEFT = 4
+    NEWSKILLS = 5
+    HP = 6
+    MAXHP = 7
+    MANA = 8
+    MAXMANA = 9
+    LEVEL = 12
+    EXP = 13
+    GOLD = 14
+    GOLDBANK = 15
+    MAGIC_FIND = 80
+    IAS = 93
+    FCR = 105
+    NUMSOCKETS = 194
+
+
+# BODY_LOCATION（装备槽位）
+class BodyLocation:
+    NONE = 0
+    HEAD = 1
+    AMULET = 2
+    BODY = 3
+    RIGHT_PRIMARY = 4
+    LEFT_PRIMARY = 5
+    RIGHT_RING = 6
+    LEFT_RING = 7
+    BELT = 8
+    FEET = 9
+    GLOVES = 10
+    RIGHT_SECONDARY = 11
+    LEFT_SECONDARY = 12
+
+
+# ----------------------------------------------------------------
+# 解析辅助：把「默认基址下的绝对地址」换算成「真实模块基址下的地址」。
+# 运行时必须先收集真实模块基址（collect_module_bases），再 resolve。
+# ----------------------------------------------------------------
+
+def collect_module_bases(handle: int, dlls: list[str] | None = None) -> dict[str, int]:
+    """收集所需 DLL 的真实模块基址：{逻辑名: base}。找不到的不会出现在结果里。"""
+    if dlls is None:
+        dlls = list(MODULE_FILE.keys())
+    bases: dict[str, int] = {}
+    for dll in dlls:
+        fname = MODULE_FILE.get(dll)
+        if not fname:
+            continue
+        info = proc.get_module_info(handle, fname)
+        if info:
+            bases[dll] = info[0]
+    return bases
+
+
+def resolve(bases: dict[str, int], dll: str, name: str) -> int | None:
+    """把 1.13c 绝对地址换算为进程真实地址；模块未加载或名称未知返回 None。"""
+    if dll not in bases:
+        return None
+    if dll not in VARS or name not in VARS[dll]:
+        return None
+    return bases[dll] + (VARS[dll][name] - DLLBASE[dll])
+
+
+def read_ptr(handle: int, bases: dict[str, int], dll: str, name: str) -> int | None:
+    """读取一个 4 字节指针值（变量指针指向的数据地址或指针本身）。"""
+    addr = resolve(bases, dll, name)
+    if addr is None:
+        return None
+    return proc.read_uint(handle, addr, 4)
+
+
+def read_byte(handle: int, bases: dict[str, int], dll: str, name: str) -> int | None:
+    """读取 1 字节（如 InGame / BOOL 标志）。"""
+    addr = resolve(bases, dll, name)
+    if addr is None:
+        return None
+    return proc.read_uint(handle, addr, 1)
