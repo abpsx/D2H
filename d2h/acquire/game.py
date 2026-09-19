@@ -314,6 +314,22 @@ def find_unit_by_id(handle: int, bases: dict[str, int], unit_id: int,
     return None
 
 
+def read_unit_pos(handle: int, p_path: int, unit_type: int | None) -> tuple[int | None, int | None]:
+    """按单位类型选正确的路径结构读坐标，返回 (x, y)；读不到为 (None, None)。
+
+    ⚠️ 路径是 union：玩家/怪物/导弹用 **DynamicPath**（WORD 坐标 @+0x02/+0x06），
+    物件/物品/地块用 **StaticPath**（DWORD 坐标 @+0x0C/+0x10）。混用会得到
+    65535 之类的垃圾值（布局不同，参考 d2structs.h）。
+    """
+    if not p_path:
+        return (None, None)
+    if unit_type in (0, 1, 3):          # Player / Monster / Missile
+        return (proc.read_uint(handle, p_path + 0x02, 2),
+                proc.read_uint(handle, p_path + 0x06, 2))
+    return (proc.read_uint(handle, p_path + 0x0C, 4),   # Object / Item / Tile
+            proc.read_uint(handle, p_path + 0x10, 4))
+
+
 def read_hover_unit(handle: int, bases: dict[str, int]) -> dict:
     """读取鼠标当前指向的单位（只读）。返回 dict，读不到的字段为 None。
 
@@ -358,8 +374,7 @@ def read_hover_unit(handle: int, bases: dict[str, int]) -> dict:
         out["mode"] = proc.read_uint(handle, p + 0x10, 4)
         pp = proc.read_uint(handle, p + 0x2C, 4)
         if pp:
-            out["x"] = proc.read_uint(handle, pp + 0x02, 2)
-            out["y"] = proc.read_uint(handle, pp + 0x06, 2)
+            out["x"], out["y"] = read_unit_pos(handle, pp, out["unit_type"])
         if out.get("unit_type") == 0:
             pd = proc.read_uint(handle, p + 0x14, 4)
             if pd:

@@ -36,6 +36,21 @@ class DynamicPath(ctypes.Structure):
     ]
 
 
+class StaticPath(ctypes.Structure):
+    """静态路径（物件/物品/地块），坐标是 **DWORD**，布局与 DynamicPath 完全不同。
+
+    参考 d2structs.h：dwMapPosX +04 / dwMapPosY +08 / dwPosX +0C / dwPosY +10。
+    ⚠️ 曾按 DynamicPath 的 +0x02/+0x06 读 WORD，物件坐标读出 y=65535 —— 布局混用。
+    """
+    _fields_ = [
+        ("_1", DWORD),         # +00
+        ("dwMapPosX", DWORD),  # +04
+        ("dwMapPosY", DWORD),  # +08
+        ("dwPosX", DWORD),     # +0C
+        ("dwPosY", DWORD),     # +10
+    ]
+
+
 class PlayerData(ctypes.Structure):
     _fields_ = [
         ("szName", CHAR * 16),        # +00  角色名（单字节）

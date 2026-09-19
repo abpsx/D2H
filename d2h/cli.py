@@ -574,6 +574,7 @@ def _num(v, hexa: bool = False) -> str:
 
 def _dump_hover(handle, p: int) -> None:
     """打印 SelectedUnit 指向的单位信息。"""
+    from d2h.acquire import game as gm
     from d2h.acquire import process as proc
 
     u = _read_unit_head(handle, p)
@@ -587,8 +588,7 @@ def _dump_hover(handle, p: int) -> None:
           f"unitId={_num(u['dwUnitId'], True)}  mode={_num(u['dwMode'])}")
     pp = u["pPath"]
     if pp:
-        x = proc.read_uint(handle, pp + 0x02, 2)
-        y = proc.read_uint(handle, pp + 0x06, 2)
+        x, y = gm.read_unit_pos(handle, pp, t)
         if x is None or y is None:
             print(f"  坐标=<读不到 pPath=0x{pp:08X}>")
         else:
@@ -623,8 +623,8 @@ def _looks_like_unit(handle, v, block=None):
     pp = proc.read_uint(handle, v + 0x2C, 4)
     if not pp:
         return None
-    x = proc.read_uint(handle, pp + 0x02, 2)
-    y = proc.read_uint(handle, pp + 0x06, 2)
+    from d2h.acquire import game as gm
+    x, y = gm.read_unit_pos(handle, pp, t)
     if x is None or y is None:
         return None
     return (t, txt, uid, x, y)
