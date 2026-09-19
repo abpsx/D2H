@@ -14,11 +14,14 @@ import os
 import re
 import struct
 
+from d2h import paths
 from d2h.acquire import offsets as off
 from d2h.acquire import process as proc
 from d2h.acquire import structs as st
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+# ⚠️ 必须走 paths.DATA（= <根>/d2h/data）。曾写成 items.py 同级的 acquire/data，
+#    路径错一层 => 表加载不到、所有物品名静默回退成代码（2026-09-20 修复）。
+DATA_DIR = str(paths.DATA)
 VCB_PATH = os.path.join(DATA_DIR, "item_codes.vcb")
 
 _ITEM_NAME_CACHE: dict[str, str] | None = None
@@ -44,18 +47,22 @@ def load_item_names(path: str = VCB_PATH) -> dict[str, str]:
     if _ITEM_NAME_CACHE is not None:
         return _ITEM_NAME_CACHE
     names: dict[str, str] = {}
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("//") or line.startswith(";") or line.startswith("#"):
-                    continue
-                m = re.match(r"^(.*?),\s*([^:]+?)\s*:\s*(\d+)\s*$", line)
-                if m:
-                    name = m.group(1).strip()
-                    code = m.group(2).strip().lower()
-                    if code:
-                        names[code] = name
+    if not os.path.exists(path):
+        # 不静默：表里明明有名字却显示成代码，多半就是这里路径错了
+        print(f"[WARN] 物品名表不存在: {path} —— 物品名将回退为代码")
+        _ITEM_NAME_CACHE = names
+        return names
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("//") or line.startswith(";") or line.startswith("#"):
+                continue
+            m = re.match(r"^(.*?),\s*([^:]+?)\s*:\s*(\d+)\s*$", line)
+            if m:
+                name = m.group(1).strip()
+                code = m.group(2).strip().lower()
+                if code:
+                    names[code] = name
     _ITEM_NAME_CACHE = names
     return names
 

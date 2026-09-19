@@ -68,6 +68,11 @@ def enumerate_inventory(handle: int, unit: st.UnitAny) -> list[dict]:
     1) 散落物品（背包/方块/仓库/腰带）：从 UnitInventory.pFirstItem 沿 pListNext 走。
     2) 已装备物品：从 UnitInventory.pInvInfo 的指针数组（dwInvInfoCount 项）逐个解引用。
 
+    ⚠️**同一指针 = 同一物品**，必须按指针去重（2026-09-20 用户判明）：
+      · 双手武器同时占「右手主手」和「左手主手」两个槽 → 数组里两条相同指针；
+      · 背包/仓库里占多格的物品（2×2 就有 4 格）→ 会出现 4 条相同指针。
+      不去重会把一件武器显示成两把、一个 2×2 物品显示成四个。
+
     按 dwUnitType==ITEM 过滤，坏指针/容器节点/空槽由 read_struct 返回 None 或类型不符剔除。
     上限 256 防失控，环路用 seen 去重。M2 将接入 ItemTxt/.vcb 把 type 解码成物品名。
     """
@@ -107,6 +112,7 @@ def enumerate_inventory(handle: int, unit: st.UnitAny) -> list[dict]:
             for p in ptrs:
                 if not p or p < 0x10000 or p in seen:
                     continue
+                seen.add(p)          # ★ 必须登记：同一件物品会出现多次（双手武器/多格物品）
                 ua = proc.read_struct(handle, p, st.UnitAny)
                 if not ua:
                     continue

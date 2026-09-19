@@ -733,6 +733,8 @@ def cmd_hover(args) -> int:
                                     interval, lo, hi)
         last = None
         rc = 0
+        limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
+        deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
             u = gm.read_hover_unit(handle, bases)
             key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"),
@@ -749,6 +751,10 @@ def cmd_hover(args) -> int:
                     _dump_hover(handle, u["ptr"])
                 last = key
             if not watch:
+                break
+            # 限时监听：--seconds > 0 时到点自动结束（便于非交互抓取，如脚本里跑 20 秒）
+            if limit and time.time() >= deadline:
+                print(f"\n监听满 {args.seconds:.0f} 秒，结束")
                 break
             time.sleep(interval)
         return rc
@@ -1232,7 +1238,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hp.add_argument(
         "--seconds", type=float, default=30.0,
-        help="--scan 的扫描时长秒数（默认 30）",
+        help="时长秒数：--scan 的扫描时长 / --watch 的监听时长（默认 30；--watch 给 0 表示不限时）",
     )
     hp.add_argument(
         "--range", nargs=2, default=[0x100000, 0x130000],
