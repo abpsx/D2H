@@ -409,9 +409,6 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
     def rd(key: str):
         return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
 
-    def rd(key: str):
-        return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
-
     out["sel_ptr"] = rd("SelectedUnitFlag")
     out["sel2_ptr"] = rd("SelectedUnitFlag2")
     out["hover_id"] = rd("HoverUnitId")
@@ -431,8 +428,14 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
         return True
 
     # 悬停开关门控：flag=0 ⇒ 明确没有可交互对象（值再旧也不采信）
+    # ★ 但**悬停文本不看门控**：它是游戏此刻画在屏幕上的那行字，flag 不抬的场景
+    #   （典型：鼠标停在地面物品名文本框上）照样有值 ⇒ 文本非空本身就是一个悬停信号。
     if gate and out["flag"] == 0:
-        out["source"] = "无悬停对象(HoverFlag=0)"
+        if out.get("text"):
+            out["source"] = ("无单位指针（HoverFlag=0），但悬停文本非空 "
+                             "-> 以文本为准")
+        else:
+            out["source"] = "无悬停对象(HoverFlag=0)"
         return out
 
     # 1) UI 内/地上的物品  2)+3) 两个"选中标记"（实测是标记，校验基本会跳过）

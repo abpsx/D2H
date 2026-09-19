@@ -567,11 +567,16 @@ def _read_unit_head(handle, p: int):
     }
 
 
-def _num(v, hexa: bool = False) -> str:
-    """字段可能为 None（读不到），统一显示为 '-'。"""
+def _num(v, hexa: bool = False, width: int = 0) -> str:
+    """字段可能为 None（读不到），统一显示为 '-'。
+
+    width 用于十六进制补零（指针统一 8 位，便于肉眼比对）。
+    """
     if v is None:
         return "-"
-    return f"0x{v:X}" if hexa else str(v)
+    if hexa:
+        return f"0x{v:0{width}X}" if width else f"0x{v:X}"
+    return str(v)
 
 
 def _dump_hover(handle, p: int, namer=None) -> None:
@@ -607,6 +612,50 @@ def _dump_hover(handle, p: int, namer=None) -> None:
         raw = proc.read_bytes(handle, u["pUnitData"], 16) or b""
         name = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
         print(f"  玩家名={name}")
+
+
+def _print_hover_frame(handle, u: dict, namer) -> None:
+    """完整打印一次采样的「悬停对象结构」——所有字段一律输出，空值显式打 `-`。
+
+    ★★ 约定（2026-09-20 老大）：**不显示 ≠ 没读到**，禁止因"觉得没意义"而裁剪字段。
+    历史教训：悬停文本原先只在 `HoverFlag=1` 的分支里打印，结果明明读到了
+    `融解药` 却被藏住，反被当成地址错误、白查一轮。所以这里：
+      · D2WIN 侧观测量（开关 / 框坐标 / 文本）**不看门控，永远打**；
+      · D2CLIENT 侧四个原始值（含两个已判定的标记位）**永远打**；
+      · 判定结果、单位详情缺失时打 `-`，让人一眼分清「读到空」和「没读」。
+    """
+    stamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{stamp}] ==== 悬停对象完整结构 ====")
+    # ---- D2WIN 侧：与单位指针无关的原始观测量 ----
+    print(f"  D2WIN+0xCA664    HoverFlag        = {_num(u.get('flag'))}"
+          "    (1=有可交互对象 / 0=无)")
+    print(f"  D2WIN+0xCA658    框坐标 x         = {_num(u.get('hx'))}")
+    print(f"  D2WIN+0xCA65C    框坐标 y         = {_num(u.get('hy'))}")
+    txt = u.get("text") or ""
+    print(f"  D2WIN+0xC9E58    悬停文本         = {txt or '-'}"
+          "    (游戏此刻画出的那行字，不依赖任何指针)")
+    # ---- D2CLIENT 侧 ----
+    ut = u.get("hover_type")
+    tname = f" {UNIT_TYPE_NAME.get(ut, '未知类型')}" if ut is not None else ""
+    print(f"  D2CLIENT+0x119638 HoverUnitId     = {_num(u.get('hover_id'), True)}")
+    print(f"  D2CLIENT+0x11964C HoverUnitType   = {_num(ut)}{tname}")
+    print(f"  D2CLIENT+0x11C2F4 SelFlag         = {_num(u.get('sel_ptr'))}"
+          "    (已判定：标记位，不是指针)")
+    print(f"  D2CLIENT+0x11C2F8 SelFlag2        = {_num(u.get('sel2_ptr'))}"
+          "    (已判定：标记位，不是指针)")
+    print(f"  D2CLIENT+0x11BC38 CurrentViewItem = {_num(u.get('view_item'), True, 8)}")
+    # ---- 判定结果 ----
+    print("  ---- 判定 ----")
+    print(f"  来源             = {u.get('source') or '-'}")
+    p = u.get("ptr")
+    if not p:
+        print("  UnitAny          = -    （本次没取到单位指针）")
+        if txt:
+            print("  => 无单位指针但悬停文本非空：以文本为准"
+                  "（地面物品名文本框 / UI 内短名等场景）")
+        return
+    print(f"  UnitAny          = 0x{p:08X}")
+    _dump_hover(handle, p, namer)
 
 
 def _looks_like_unit(handle, v, block=None):
@@ -748,55 +797,24 @@ def cmd_hover(args) -> int:
         if gate:
             print("（悬停开关：D2WIN+0xCA664 HoverFlag —— 0 即判无悬停对象，"
                   "地面/空处不再误报；加 --no-gate 关闭）")
-        print("（不再去抖：HoverFlag=1 当帧即取指针，换对象立刻更新；"
-              f"采样间隔 {interval}s）")
+        print("（输出 = 每次采样的完整结构：D2WIN 开关/框坐标/悬停文本 + D2CLIENT 四个原始值 + 判定；"
+              "空值一律打 '-'，不做任何裁剪）")
+        print(f"（不再去抖：HoverFlag=1 当帧即取指针，换对象立刻更新；采样间隔 {interval}s；"
+              "--raw = 每帧都打，不加则只在任一字段变化时打）")
         last_key = None
-        had = False        # 上一状态是否「有悬停对象」
-        first = True       # 首次采样必打印状态（单次读数也总有输出）
+        first = True       # 首次采样必打印（单次读数也总有输出）
         rc = 0
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
         deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
             u = gm.read_hover_unit(handle, bases, gate=gate)
-            flag = u.get("flag")
-            if gate and flag == 0:
-                # 权威开关说没有可交互对象 —— 旧值一律不采信（不再等第二帧确认）
-                if had or first:
-                    stamp = datetime.now().strftime("%H:%M:%S")
-                    old = (f"  旧值 id=0x{u.get('hover_id') or 0:X} "
-                           f"type={u.get('hover_type')}" if u.get("hover_id") else "")
-                    if had:
-                        print(f"[{stamp}] 已移开（HoverFlag=0）{old} —— 不采信")
-                    else:
-                        print(f"[{stamp}] 无悬停对象（HoverFlag=0）{old}")
-                    had = False
-                    last_key = None
-            else:
-                key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"))
-                if key != last_key or getattr(args, "raw", False):
-                    stamp = datetime.now().strftime("%H:%M:%S")
-                    print(f"[{stamp}] HoverFlag={flag} 框坐标=({u.get('hx')},{u.get('hy')})  "
-                          f"悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
-                          f"SelFlag={u['sel_ptr']} SelFlag2={u['sel2_ptr']} "
-                          f"ViewItem=0x{u['view_item'] or 0:08X}")
-                    txt = u.get("text") or ""
-                    if not u.get("ptr"):
-                        if u.get("source"):
-                            print(f"  {u['source']}")
-                        else:
-                            print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
-                        if txt:
-                            print(f"  悬停文本={txt}")
-                            print("    ^ 游戏此刻显示的那行字（D2WIN+0xC9E58，不依赖单位指针；"
-                                  "地面物品名文本框这类取不到单位的场景靠它）")
-                    else:
-                        print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
-                        if txt:
-                            print(f"  悬停文本={txt}")
-                        _dump_hover(handle, u["ptr"], namer)
-                    last_key = key
-                    had = True
-            first = False
+            # ★ 任一字段变化即算新状态（含悬停文本 —— flag=0 但有文本也照打）
+            key = (u.get("flag"), u.get("ptr"), u.get("hover_id"),
+                   u.get("hover_type"), u.get("view_item"), u.get("text"))
+            if first or key != last_key or getattr(args, "raw", False):
+                _print_hover_frame(handle, u, namer)
+                last_key = key
+                first = False
             if not watch:
                 break
             # 限时监听：--seconds > 0 时到点自动结束（便于非交互抓取，如脚本里跑 20 秒）
