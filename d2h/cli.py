@@ -674,6 +674,9 @@ def _dump_hover(handle, p: int, namer=None) -> None:
 def _print_hover_frame(handle, u: dict, namer) -> None:
     """完整打印一次采样的「悬停对象结构」——所有字段一律输出，空值显式打 `-`。
 
+    ⚠️ 2026-09-20 踩过：`gm` 只在 `_dump_hover` 里局部导入，本函数直接用会
+    `NameError: name 'gm' is not defined`（报错快照抓到）。需要 game 模块就先导入。
+
     ★★ 约定（2026-09-20 老大）：**不显示 ≠ 没读到**，禁止因"觉得没意义"而裁剪字段。
     历史教训：悬停文本原先只在 `HoverFlag=1` 的分支里打印，结果明明读到了
     `融解药` 却被藏住，反被当成地址错误、白查一轮。所以这里：
@@ -681,6 +684,8 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
       · D2CLIENT 侧四个原始值（含两个已判定的标记位）**永远打**；
       · 判定结果、单位详情缺失时打 `-`，让人一眼分清「读到空」和「没读」。
     """
+    from d2h.acquire import game as gm
+
     stamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{stamp}] ==== 悬停对象完整结构 ====")
     # ---- 沿触发：本次是因哪个标记跳变而取样的 ----
