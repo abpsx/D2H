@@ -87,21 +87,34 @@ def enumerate_inventory(handle: int, unit: st.UnitAny) -> list[dict]:
 
     seen: set[int] = set()
 
-    # 1) 散落物品
+    # 1) 散落物品（★ 2026-09-20 实测修正：兄弟链必须走 **ItemData+0x64 = pNextInvItem**）
+    #    ⚠️ 踩过的坑（**静默漏数**，最毒的一种错）：原来只沿 `UnitAny+0xE8 (pListNext)`
+    #       走，实测该字段对**背包内物品恒为 0** ⇒ 循环第一件就 break，整个背包只出 1 件，
+    #       而且**不报错**。实机对照（同一玩家 UnitInventory，pFirstItem=0x03D9F200）：
+    #         · 沿 +0xE8 → 1 件       · 沿 +0x64 → 40 件（uid 1..0x28，含腰带药水/已装备件）
+    #       ⇒ 以 +0x64 为主，为 0 才退 +0xE8（两者都试，避免又漏）。镶入物同理，见
+    #       `itemprops.socket_children`。
     addr = inv.pFirstItem
     guard = 0
-    while addr and guard < 256 and addr not in seen:
+    while addr and guard < 512 and addr not in seen:
         seen.add(addr)
         ua = proc.read_struct(handle, addr, st.UnitAny)
         if not ua:
             break
+        idata = None
         if ua.dwUnitType == off.UnitNo.ITEM and ua.pUnitData:
             idata = proc.read_struct(handle, ua.pUnitData, st.ItemData)
             if idata:
-                items.append(_item_record(ua, idata))
-        if not ua.pListNext:
+                rec = _item_record(ua, idata)
+                rec["ptr"] = addr              # ★ 后续按指针查词缀/属性要用
+                rec["unit_id"] = ua.dwUnitId
+                items.append(rec)
+        nxt = idata.pNextInvItem if idata else 0
+        if not nxt:
+            nxt = ua.pListNext
+        if not nxt:
             break
-        addr = ua.pListNext
+        addr = nxt
         guard += 1
 
     # 2) 已装备物品（pInvInfo 指针数组）
@@ -119,7 +132,10 @@ def enumerate_inventory(handle: int, unit: st.UnitAny) -> list[dict]:
                 if ua.dwUnitType == off.UnitNo.ITEM and ua.pUnitData:
                     idata = proc.read_struct(handle, ua.pUnitData, st.ItemData)
                     if idata:
-                        items.append(_item_record(ua, idata))
+                        rec = _item_record(ua, idata)
+                        rec["ptr"] = p         # ★ 后续按指针查词缀/属性要用
+                        rec["unit_id"] = ua.dwUnitId
+                        items.append(rec)
 
     return items
 

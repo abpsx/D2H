@@ -292,6 +292,240 @@ def cmd_items(args) -> int:
     return 0
 
 
+def _print_layout(lay: dict) -> None:
+    """打印 gpt 描述区里与词缀相关的槽位（原始值，全部打出来）。"""
+    print("---- 词缀表布局（gpt 描述区，1.13c 偏移）----")
+    print(f"  gpt=0x{lay['gpt']:08X}  nItemsTxt={lay['n_items_txt']}"
+          f"  词缀表当前可读={'是' if lay['tables_readable'] else '否'}")
+    print(f"  0x90 块 基址=0x{lay['magic_block']:08X}（一张大表，行距 0x90）")
+    print(f"    值 1..{lay['magic_suffix_rows']}      后缀区   "
+          f"（gpt+0x2C 与 gpt+0x30 两指针实测相差 {lay['magic_suffix_rows']} 行）")
+    print(f"    值 {lay['magic_suffix_rows'] + 1}..{lay['magic_suffix_rows'] + lay['magic_prefix_rows']}"
+          f"   前缀区   (gpt+0x30=0x{lay['magic_prefix']:08X})")
+    print(f"    值 {lay['magic_suffix_rows'] + lay['magic_prefix_rows'] + 1}"
+          f"..{lay['magic_suffix_rows'] + lay['magic_prefix_rows'] + lay['auto_rows']}"
+          f"  第三段   (gpt+0x34=0x{lay['auto_affix']:08X} 共 {lay['auto_rows']} 行)"
+          f"  ← 身份推断=自动前缀(automagic)，待实机确认")
+    print(f"  0x48 块 基址=0x{lay['rare_words']:08X}（稀有物品**名字词**，行距 0x48）")
+    print(f"    值 1..{lay['rare_word_suffix_rows']}    稀有后缀词区"
+          f"    值 {lay['rare_word_suffix_rows'] + 1}..{lay['rare_word_suffix_rows'] + lay['rare_word_prefix_rows']}"
+          f"  稀有前缀词区 (gpt+0x54=0x{lay['rare_words_prefix']:08X})"
+          f"   （gpt+0x48 计数={lay['n_rare_words']}）")
+    print(f"  Gems p=0x{lay['gems']:08X} n={lay['n_gems']}"
+          f"   Runes/Runewords p=0x{lay['runes']:08X} n={lay['n_runes']}")
+    print(f"  取行公式={lay['id_mode']}")
+    print("    ⇒ 值=1 命中表首行；`另一解` 列就是「值当 0 基」的邻行。")
+    print("    ★ 已用实机 roll 值证实（2026-09-20）：稀有戒指 4 条属性同时命中 (值-1) ——")
+    print("      后缀174→行173 学徒的 FCR 10-10（实际10）、后缀286→行285 机会的 MF 5-15（实际10）、")
+    print("      前缀1156→行1155 Beryl PR 5-10（实际10）、前缀987→行986 Steel AR 41-60（实际43）。")
+    print("      故「采信」列=已证实；`props --hover` 的悬停对答案保留作回归手段。")
+    if not lay["tables_readable"]:
+        print("  [WARN] 词缀表内容当前为不可读（读到全 0）。实测**离开游戏后该块会被清零**，")
+        print("         所以先确认在游戏中，再判读下面的词缀结果。")
+
+
+def _print_item_props(rep: dict, title: str, props, hover_text: str = "",
+                      depth: int = 0) -> None:
+    """完整打印一件物品的词缀 + 属性（规范 §12：所有字段一律打，缺失打 `-`）。
+
+    `props` = itemprops.ItemProps 实例（借它读孔内子物品；自带 handle/bases）。
+    `depth` 仅用于孔内递归限深，避免异常数据无限套娃。
+    """
+    from d2h.acquire import itemprops as ipx
+
+    print()
+    print(title)
+    print(f"  ptr=0x{rep['ptr']:08X}  unit_type={rep['unit_type']}  txt_file_no={rep['txt_file_no']}"
+          f"  unit_id=0x{rep['unit_id']:X}  pItemData=0x{rep['p_item_data']:08X}")
+    if hover_text:
+        print(f"  悬停文本框(游戏自绘，对答案用)= {hover_text}")
+    if not rep.get("ok"):
+        print(f"  [FAIL] {rep.get('reason')}")
+        return
+    f = rep["fields"]
+    print("  -- ItemData 原始字段 --")
+    print(f"    dwQuality={f['quality']}  dwFileIndex={f['file_index']}  dwItemLevel={f['ilvl']}"
+          f"  wItemFormat={f['item_format']}")
+    print(f"    dwItemFlags=0x{f['flags']:08X}  [{', '.join(rep['flag_names']) or '-'}]")
+    print(f"    nBodyLocation={f['n_body_location']}  nItemLocation={f['n_item_location']}"
+          f"  nLocation={f['n_location']}")
+    print(f"    dwOwnerId=0x{f['owner_id']:08X}  pOwnerInventory=0x{f['p_owner_inv']:08X}"
+          f"  pNextInvItem=0x{f['p_next_inv_item']:08X}")
+    print(f"    wRarePrefix={f['rare_prefix']}  wRareSuffix={f['rare_suffix']}"
+          f"  wAutoPrefix={f['auto_prefix']}")
+    raw_mp = f.get("magic_prefix_raw") or f["magic_prefix"]
+    print(f"    wMagicPrefix={raw_mp}  wMagicSuffix={f['magic_suffix']}")
+    rw = rep.get("runeword")
+    if rw:
+        print(f"    ★ 符文之语：wMagicPrefix[0]={rw['locale']} 是**名字 locale id**（不是词缀索引）"
+              f" → {rw['name'] or '-'}")
+
+    print("  -- 词缀 --")
+    any_affix = False
+    for a in rep["affixes"]:
+        if not a["idx"] and not a["rec"]:
+            continue
+        any_affix = True
+        print(f"    [{a['kind']} 槽{a['slot']}] id={a['idx'] or 0}  解析方式={a.get('mode') or '-'}")
+        r = a.get("rec")
+        if r:
+            print(f"        采信  : 行{a['idx'] - 1}({a.get('zone') or '-'})  0x{r['rec_addr']:08X}"
+                  f"  name={r['name'] or '-'}  internal={r['internal'] or '-'}"
+                  f"  locale={r['locale']}")
+        elif a["idx"]:
+            print(f"        采信  : -（行{a['idx'] - 1} {a.get('zone') or '-'} 读不到名字："
+                  f"越界 / 空行 / 表不可读）")
+        alt = a.get("alt_rec")
+        if alt:
+            print(f"        另一解: 行{a['idx']}({a.get('alt_zone') or '-'})  0x{alt['rec_addr']:08X}"
+                  f"  name={alt['name'] or '-'}  internal={alt['internal'] or '-'}"
+                  f"  locale={alt['locale']}")
+        else:
+            print(f"        另一解: -（行{a['idx']} {a.get('alt_zone') or '-'}）")
+    if not any_affix:
+        print("    （该物品 ItemData 里没有词缀 id：普通/超强/暗金/套装/宝石/符文都是这样）")
+    rn = rep.get("rare_name")
+    if rn and (f.get("rare_prefix") or f.get("rare_suffix")):
+        print(f"  -- 稀有物品显示名（前缀词+后缀词，游戏公式取行）--")
+        print(f"    (值-1) 采信 = {rn['primary']}")
+        print(f"    (值)   另一解 = {rn['alt']}")
+
+    print(f"  -- 属性 StatList 全组（共 {len(rep['stats'])} 条；原始值直读=显示值，"
+          f"已用悬停文本验证）--")
+    for k, s in enumerate(rep["stats"]):
+        extra = (f"  alt(÷256,未验证)={s['value_alt']}" if s.get("value_alt") is not None else "")
+        print(f"    [{k:>3}] {'EX' if s['ex'] else '  '} list{s['list']} {s['group']:<4s}"
+              f" #{s['index']:<2d} stat={s['stat_id']:<4d} param={s['param']:<5d}"
+              f" raw={s['value']:<10d} show={s['value_show']:<8}{extra}"
+              f" desc={s['desc'] or '-'}"
+              f" func={s['desc_func']} val={s['desc_val']} text={s['text'] or '-'}"
+              f"  [ItemStatCost 原样: div={s['isc_div']} mul={s['isc_mul']}]")
+    print(f"  -- 孔内物品（{len(rep['sockets'])} 个）--")
+    if not rep["sockets"]:
+        print("    -（该物品未打孔，或孔内为空；未打孔时 pOwnerInventory 指向玩家背包，"
+              "不能当孔用，code 已按 SOCKETED 标志门控）")
+    _tb = None
+    _lt = None
+    for sp in rep["sockets"]:
+        if depth >= 1:
+            print(f"    孔内 ptr=0x{sp:08X}（层级过深，不再递归）")
+            continue
+        sub = ipx.item_affix_report(props.handle, props.bases, sp)
+        # 子物品先报「代码 + 显示名」（内存 ItemTxt + 内存字符串表），取不到打 `-`
+        if sub.get("ok"):
+            if _tb is None:
+                from d2h.acquire import items as itm
+                from d2h.acquire import lang as lg
+                _tb = itm.ItemTextTable(props.handle, props.bases)
+                _lt = lg.LocaleText(props.handle, props.bases)
+            _rec = _tb.read(sub["txt_file_no"]) if _tb.ptr else None
+            _nm = ""
+            if _rec and _lt.ready():
+                _nm = _lt.get_clean(_rec["locale"]) or ""
+            print(f"    孔内 ptr=0x{sp:08X}  txt={sub['txt_file_no']}"
+                  f"  code={_rec['code'] if _rec else '-'}  名={_nm or '-'}")
+        _print_item_props(sub, f"    ++++ 孔内物品 ptr=0x{sp:08X} ++++", props, "", depth + 1)
+
+
+def cmd_props(args) -> int:
+    """物品词缀 + 属性解析（只读）。
+
+    规范 §12：所有字段一律打印，空值显式打 `-`，禁止按条件裁剪。
+
+    用法：
+      props                列出背包/装备物品（编号 + 名称 + 原始词缀 id 一览）
+      props --index 3      对第 3 件出完整报告
+      props --all          对全部物品出报告
+      props --hover        对鼠标当前指向的物品出报告（同时打印游戏自绘的悬停文本框，用于对答案）
+    """
+    from d2h.acquire import process as proc
+    from d2h.acquire import offsets as off
+    from d2h.acquire import game as gm
+    from d2h.acquire import items as itm
+    from d2h.acquire import itemprops as ipx
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        print(f"process not found: {exe}")
+        LOGGER.error("[FAIL] process not found: %s", exe)
+        return 1
+    handle = proc.open_readonly(pid)
+    try:
+        bases = off.collect_module_bases(handle)
+        for need in ("D2CLIENT", "D2COMMON"):
+            if need not in bases:
+                print(f"[FAIL] 缺少模块 {need}，无法解析")
+                return 1
+        st = gm.in_game_status(handle, bases)
+        print(f"STATUS: {st['status']}  ({st['status_desc']})  game_mode={st.get('game_mode')}")
+
+        props = ipx.ItemProps(handle, bases)
+        _print_layout(props.table_layout())
+
+        rows: list[dict] = []
+        hover_text = ""
+        if args.hover:
+            u = gm.read_hover_unit(handle, bases)
+            ptr = u.get("ptr")
+            print(f"鼠标指向: {u.get('source') or '-'}  ptr={'0x%08X' % ptr if ptr else '-'}"
+                  f"  unit_type={u.get('unit_type')}  txt={u.get('txt')}")
+            hover_text = gm.read_hover_text(handle, bases)
+            print(f"悬停文本框(游戏自绘)= {hover_text or '-'}")
+            if ptr:
+                rows = [{"ptr": ptr, "name": u.get("name") or "", "code": "",
+                         "type": u.get("txt"), "quality": None, "type_name": "",
+                         "ilvl": None, "file_index": None, "unit_id": u.get("unit_id"),
+                         "name_src": "悬停"}]
+        else:
+            rows = itm.named_inventory(handle, bases)
+            if not rows:
+                print("[WARN] 没有枚举到任何物品（不在游戏内 / 玩家单位不可读）")
+                return 1
+
+        if not (args.index or args.all or args.hover):
+            print()
+            print(f"---- 物品清单（{len(rows)} 件；此处 mP/mS 是 ItemData 原始 id，未解析）----")
+            for i, row in enumerate(rows, 1):
+                ptr = row.get("ptr") or 0
+                ids = ""
+                if ptr:
+                    pd = proc.read_uint(handle, ptr + 0x14, 4) or 0
+                    fr = ipx.read_item_fields(handle, pd) if pd else {}
+                    if fr:
+                        ids = (f"  mP={fr['magic_prefix']} mS={fr['magic_suffix']}"
+                               f" rP={fr['rare_prefix']} rS={fr['rare_suffix']}"
+                               f" auto={fr['auto_prefix']}")
+                print(f"  [{i:>3}] {(row.get('name') or '?')}"
+                      f"  ({row.get('type_name') or '-'}/{row.get('code') or '-'})"
+                      f"  txt={row.get('type')} ilvl={row.get('ilvl')}"
+                      f"  fidx={row.get('file_index')}  ptr=0x{ptr:08X}{ids}")
+            print()
+            print("  --index N 看某一件的完整词缀+属性；--all 全看；--hover 看鼠标指着的那件。")
+            return 0
+
+        if args.index:
+            if not (1 <= args.index <= len(rows)):
+                print(f"[FAIL] 序号 {args.index} 越界（共 {len(rows)} 件）")
+                return 1
+            sel = [rows[args.index - 1]]
+        else:
+            sel = rows
+
+        for i, row in enumerate(sel, 1):
+            ptr = row.get("ptr") or 0
+            if not ptr:
+                continue
+            rep = ipx.item_affix_report(handle, bases, ptr)
+            tag = f"#{args.index}" if args.index else f"#{i}/{len(sel)}"
+            title = (f"==== 物品 {tag}  {row.get('name') or '?'}"
+                     f"  ({row.get('type_name') or '-'}/{row.get('code') or '-'})"
+                     f"  名称来源={row.get('name_src') or '-'} ====")
+            _print_item_props(rep, title, props, hover_text if args.hover else "")
+    finally:
+        proc.close(handle)
+    return 0
+
+
 def cmd_ground(args) -> int:
     """枚举地面上的物品（走房间邻近表，不依赖鼠标悬停）。
 
@@ -1235,6 +1469,8 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("6", "解析快照", None),
     ("7", "当前物品清单（需在游戏中）", ["items"]),
     ("21", "地面物品枚举（房间邻近表，不依赖悬停）", ["ground"]),
+    ("22", "物品词缀 + 属性解析（列出物品与原始词缀 id；命令行 props --index N / --all / --hover 看详情）",
+     ["props"]),
     ("8", "状态码循环监控（3 秒一次：p 暂停 / Enter 立即读 / q 退出）",
      ["probe", "FOG+0x4AFE0,+0x8", "--loop", "--interval", "3", "--dump", "0", "--scan", "0"]),
     ("9", "查看临时目录", ["tmp"]),
@@ -1436,6 +1672,20 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(process_targets()),
         help="目标类型: loader=D2loader.exe / game=game.exe",
     )
+    ppp = sub.add_parser("props", help="物品词缀 + 属性解析（gpt 词缀表 / ItemStatCost / StatList，只读）")
+    ppp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
+    ppp.add_argument("--index", type=int, default=0, help="只看第 N 件（1 基，序号同本命令列出的清单）")
+    ppp.add_argument("--all", action="store_true", help="对全部物品出报告")
+    ppp.add_argument(
+        "--hover",
+        action="store_true",
+        help="对鼠标当前指向的物品出报告，同时打印游戏自绘的悬停文本框（用于对答案）",
+    )
     gp = sub.add_parser("ground", help="枚举地面上的物品（房间邻近表，不依赖悬停）")
     gp.add_argument(
         "--target",
@@ -1588,6 +1838,7 @@ _HANDLERS = {
     "state": cmd_state,
     "items": cmd_items,
     "ground": cmd_ground,
+    "props": cmd_props,
     "probe": cmd_probe,
     "list": cmd_list,
     "tmp": cmd_tmp,
