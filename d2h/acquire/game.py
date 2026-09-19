@@ -124,6 +124,108 @@ def enumerate_inventory(handle: int, unit: st.UnitAny) -> list[dict]:
     return items
 
 
+# ---- 地面物品枚举（房间邻近表，不依赖悬停）----
+# 1.13c 实机验证过的偏移（2026-09-20）；落地成本函数后，本注释即权威，另见规范 §15.1。
+ROOM1_PTR_OFF = 0x00        # DrlgRoom1** paRoomsNear —— ★二级指针
+ROOMS_NEAR_COUNT_OFF = 0x24  # dwRoomsNear（hackmap d2structs.h 注 //+04 是笔误，+0x04 处恒 0）
+ROOM_UNIT_FIRST_OFF = 0x74   # pUnitFirst（= +0x28 + 19*4，头文件未标）
+PATH_ROOM1_OFF = 0x1C        # DynamicPath -> pRoom1  ★入口
+ITEM_LOCATION_OFF = 0x69     # ItemData.nLocation（0=地面 / 1=方块·仓库·背包 / 2=腰带 / 3=身上）
+
+
+def enumerate_ground_items(handle: int, bases: dict[str, int],
+                           player_unit: int | None = None,
+                           max_rooms: int = 64, max_units: int = 4096,
+                           namer=None) -> dict:
+    """枚举**地面上（未拾取）**的物品 —— 走房间邻近表，不依赖鼠标悬停。
+
+    链（1.13c）：
+      pPlayer     = *(D2CLIENT PlayerUnit)
+      pPath       = *(pPlayer + 0x2C)              DynamicPath
+      pRoom1      = *(pPath   + 0x1C)              ★入口
+      paRoomsNear = *(pRoom1  + 0x00)              ★二级指针：房间 i = u32(pa + i*4)
+      dwRoomsNear = *(pRoom1  + 0x24)
+      pUnitFirst  = *(room    + 0x74)              链表 *(p + 0xE8) = UnitAny.pListNext
+      判定：dwUnitType == 4(ITEM) && u8(*(p+0x14) + 0x69) == 0   ← ItemData.nLocation
+
+    ⚠️ 两个坑（都踩过，改这里前先看一眼）：
+      ① 入口是 **pPath + 0x1C** 不是 pPlayer + 0x1C —— 后者是 pDrlgAct，其 +0x24 恒 0
+         ⇒ 静默返回「房间 0 个」**且不报错**，极难发现。
+      ② **paRoomsNear 是二级指针**：必须 `u32(u32(pRoom1+0x00) + i*4)`；
+         直接 `u32(pRoom1 + i*4)` 读到的是指针本身（i=4 恰命中 pRoom2 → 假房间，
+         表现为「链长 1、type 0」）。
+      ③ 坐标必须走 `read_unit_pos()`（物品是 StaticPath，手写 WORD 偏移会得到 65535）。
+
+    返回 dict（失败也返回完整结构，字段打 0 / 空列表，由调用方照 §12 完整打印）：
+      {"ok", "reason", "player", "room1", "rooms", "units", "items"}
+      items 每项 = _item_record() 的字段 + ptr / unit_id / x / y / name。
+    """
+    out: dict = {"ok": False, "reason": "", "player": None, "room1": None,
+                 "rooms": 0, "units": 0, "items": []}
+    p = player_unit or off.read_ptr(handle, bases, "D2CLIENT", "PlayerUnit")
+    if not p:
+        out["reason"] = "PlayerUnit 读不到（不在游戏里？）"
+        return out
+    out["player"] = p
+    p_path = proc.read_uint(handle, p + 0x2C, 4)
+    if not p_path:
+        out["reason"] = "pPath 读不到（+0x2C）"
+        return out
+    room1 = proc.read_uint(handle, p_path + PATH_ROOM1_OFF, 4)
+    if not room1:
+        out["reason"] = ("pRoom1 读不到 —— 检查入口是不是写成了 pPlayer+0x1C"
+                         "（那是 pDrlgAct，会静默给出 0 个房间）")
+        return out
+    out["room1"] = room1
+
+    pa = proc.read_uint(handle, room1 + ROOM1_PTR_OFF, 4)
+    n_rooms = proc.read_uint(handle, room1 + ROOMS_NEAR_COUNT_OFF, 4) or 0
+    if not pa or not n_rooms:
+        out["reason"] = f"paRoomsNear=0x{pa or 0:08X} 房间数={n_rooms}"
+        return out
+    n_rooms = min(n_rooms, max_rooms)
+    out["rooms"] = n_rooms
+
+    seen_rooms: set[int] = set()
+    seen_units: set[int] = set()
+    for i in range(n_rooms):
+        room = proc.read_uint(handle, pa + i * 4, 4)   # ★二级指针：先取数组再取元素
+        if not room or room in seen_rooms:
+            continue
+        seen_rooms.add(room)
+        node = proc.read_uint(handle, room + ROOM_UNIT_FIRST_OFF, 4)
+        guard = 0
+        while node and guard < max_units and node not in seen_units:
+            seen_units.add(node)
+            guard += 1
+            t = proc.read_uint(handle, node + 0x00, 4)
+            if t == off.UnitNo.ITEM:
+                ua = proc.read_struct(handle, node, st.UnitAny)
+                if ua and ua.pUnitData:
+                    loc = proc.read_uint(handle, ua.pUnitData + ITEM_LOCATION_OFF, 1)
+                    if loc == 0:                       # 0 = 躺在地上
+                        idata = proc.read_struct(handle, ua.pUnitData, st.ItemData)
+                        if idata:
+                            rec = _item_record(ua, idata)
+                            rec["ptr"] = node
+                            rec["unit_id"] = ua.dwUnitId
+                            x, y = read_unit_pos(handle, ua.pPath, 4)
+                            rec["x"], rec["y"] = x, y
+                            if namer is not None:
+                                try:
+                                    nm, src = namer.name(node, 4, ua.dwTxtFileNo)
+                                except Exception:       # noqa: BLE001
+                                    nm, src = "", ""
+                                rec["name"] = nm or ""
+                                rec["name_src"] = src or ""
+                            out["items"].append(rec)
+            node = proc.read_uint(handle, node + off.UNIT_NEXT_OFFSET, 4)
+
+    out["units"] = len(seen_units)
+    out["ok"] = True
+    return out
+
+
 def is_in_game(handle: int, bases: dict[str, int]) -> bool:
     """是否在游戏中：以 D2CLIENT.InGame 字节（1=在游戏）为权威信号。"""
     v = off.read_byte(handle, bases, "D2CLIENT", "InGame")

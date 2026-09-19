@@ -292,6 +292,63 @@ def cmd_items(args) -> int:
     return 0
 
 
+def cmd_ground(args) -> int:
+    """枚举地面上的物品（走房间邻近表，不依赖鼠标悬停）。
+
+    输出按 §12「完整结构」约定：所有字段都打，失败也把 reason 打出来。
+    """
+    from d2h.acquire import game as gm
+    from d2h.acquire import names as _names
+    from d2h.acquire import offsets as off
+    from d2h.acquire import process as proc
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        print(f"process not found: {exe}")
+        return 1
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+    try:
+        bases = off.collect_module_bases(handle)
+        if "D2CLIENT" not in bases:
+            print("未找到 D2Client.dll（确认已进游戏界面？）")
+            return 1
+        status = gm.in_game_status(handle, bases)
+        namer = _names.UnitNamer(handle, bases)
+        res = gm.enumerate_ground_items(handle, bases, namer=namer)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{stamp}] ==== 地面物品枚举（房间邻近表，不依赖悬停）====")
+        print(f"  在游戏中         = {status.get('in_game')}"
+              f"    (状态码={_num(status.get('state_code'))})")
+        print(f"  PlayerUnit       = {_num(res['player'], True, 8)}")
+        # 入口是 pPath+0x1C（不是 pPlayer+0x1C，那是 pDrlgAct 会静默给 0 个房间）
+        pp = proc.read_uint(handle, res["player"] + 0x2C, 4) if res["player"] else None
+        print(f"  pPath (+0x2C)    = {_num(pp, True, 8)}")
+        print(f"  pRoom1 (pPath+0x1C) = {_num(res['room1'], True, 8)}")
+        print(f"  房间数 / 单元数  = {res['rooms']} / {res['units']}")
+        print(f"  枚举结果         = {'成功' if res['ok'] else '未完成'}"
+              f"    原因={res['reason'] or '-'}")
+        items = res["items"]
+        print(f"  ---- 地面物品（nLocation==0）共 {len(items)} 件 ----")
+        if not items:
+            print("  -    （地上没有物品，或上面的原因导致没枚举到）")
+        for i, it in enumerate(items, 1):
+            nm = it.get("name") or "-"
+            print(f"  [{i}] UnitAny={_num(it.get('ptr'), True, 8)} "
+                  f"unitId={_num(it.get('unit_id'), True)} "
+                  f"txt={_num(it.get('type'))} 质量={_num(it.get('quality'))} "
+                  f"ilvl={_num(it.get('ilvl'))} loc={_num(it.get('location'))} "
+                  f"坐标=({_num(it.get('x'))},{_num(it.get('y'))}) "
+                  f"名称={nm}"
+                  + (f"  [{it['name_src']}]" if it.get("name_src") else ""))
+    finally:
+        proc.close(handle)
+    return 0
+
+
 def _parse_chain(chain: str) -> tuple[str | None, int, list[int]]:
     """解析指针链，返回 (模块名|None, 首偏移, 后续偏移列表)。
 
@@ -1071,25 +1128,7 @@ def cmd_watch(args) -> int:
 def _dispatch(argv: list[str]) -> int:
     """按 argv 执行一次子命令（菜单内部复用，避免反复启动 Python）。"""
     args = build_parser().parse_args(argv)
-    table = {
-        "info": cmd_info,
-        "find": cmd_find,
-        "snap": cmd_snap,
-        "state": cmd_state,
-        "items": cmd_items,
-        "probe": cmd_probe,
-        "list": cmd_list,
-        "tmp": cmd_tmp,
-        "parse": cmd_parse,
-        "menu": cmd_menu,
-        "watch": cmd_watch,
-        "ui": cmd_ui,
-        "hover": cmd_hover,
-        "send": cmd_send,
-        "err": cmd_err,
-        "lang": cmd_lang,
-    }
-    fn = table.get(args.cmd)
+    fn = _HANDLERS.get(args.cmd)
     return fn(args) if fn is not None else 0
 
 
@@ -1102,6 +1141,7 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("5", "列出本地快照", ["list"]),
     ("6", "解析快照", None),
     ("7", "当前物品清单（需在游戏中）", ["items"]),
+    ("21", "地面物品枚举（房间邻近表，不依赖悬停）", ["ground"]),
     ("8", "状态码循环监控（3 秒一次：p 暂停 / Enter 立即读 / q 退出）",
      ["probe", "FOG+0x4AFE0,+0x8", "--loop", "--interval", "3", "--dump", "0", "--scan", "0"]),
     ("9", "查看临时目录", ["tmp"]),
@@ -1303,6 +1343,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(process_targets()),
         help="目标类型: loader=D2loader.exe / game=game.exe",
     )
+    gp = sub.add_parser("ground", help="枚举地面上的物品（房间邻近表，不依赖悬停）")
+    gp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     prp = sub.add_parser("probe", help="多级指针链探测（只读逐层解引用/dump/扫描）")
     prp.add_argument(
         "chain",
@@ -1430,44 +1477,39 @@ def process_targets() -> dict[str, str]:
     return proc.TARGET_TYPES
 
 
+# ★ 子命令 -> 处理函数的**唯一**映射表（2026-09-20 合并）。
+# ⚠️ 历史教训：原先有两份（`_dispatch` 一份 + `main()` 里一条 if 链），新增 `ground`
+#    时只加了前者 ⇒ 命令行跑它**静默 return 0、毫无输出**，极难发现。
+#    现在 `_dispatch()` 与 `main()` 都只查这张表 ⇒ **新增命令只需改这里 + build_parser()**。
+# ⚠️ 必须放在文件末尾（要引用下方定义的 cmd_menu 等，早了会 NameError）。
+_HANDLERS = {
+    "info": cmd_info,
+    "find": cmd_find,
+    "snap": cmd_snap,
+    "state": cmd_state,
+    "items": cmd_items,
+    "ground": cmd_ground,
+    "probe": cmd_probe,
+    "list": cmd_list,
+    "tmp": cmd_tmp,
+    "parse": cmd_parse,
+    "menu": cmd_menu,
+    "watch": cmd_watch,
+    "ui": cmd_ui,
+    "hover": cmd_hover,
+    "send": cmd_send,
+    "err": cmd_err,
+    "lang": cmd_lang,
+}
+
+
 def main(argv=None) -> int:
     logfile = setup_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.cmd == "info":
-            return cmd_info(args)
-        if args.cmd == "find":
-            return cmd_find(args)
-        if args.cmd == "snap":
-            return cmd_snap(args)
-        if args.cmd == "state":
-            return cmd_state(args)
-        if args.cmd == "items":
-            return cmd_items(args)
-        if args.cmd == "probe":
-            return cmd_probe(args)
-        if args.cmd == "menu":
-            return cmd_menu(args)
-        if args.cmd == "watch":
-            return cmd_watch(args)
-        if args.cmd == "ui":
-            return cmd_ui(args)
-        if args.cmd == "hover":
-            return cmd_hover(args)
-        if args.cmd == "send":
-            return cmd_send(args)
-        if args.cmd == "list":
-            return cmd_list(args)
-        if args.cmd == "tmp":
-            return cmd_tmp(args)
-        if args.cmd == "err":
-            return cmd_err(args)
-        if args.cmd == "lang":
-            return cmd_lang(args)
-        if args.cmd == "parse":
-            return cmd_parse(args)
-        return 0
+        fn = _HANDLERS.get(args.cmd)
+        return fn(args) if fn is not None else 0
     except Exception as e:  # 顶层兜底，友好退出，不吐堆栈给用户
         LOGGER.exception("执行失败: %s", e)
         _auto_errsnap(e, argv if argv is not None else sys.argv[1:], args)
