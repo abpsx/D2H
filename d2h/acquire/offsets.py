@@ -201,15 +201,15 @@ VARS: dict[str, dict[str, int]] = {
         #   D2VARPTR2(D2CLIENT, 0x6FBCBC38, ..., CurrentViewItem, UnitAny*) // 选择显示的物品
         #   hackmap 里**唯一**一个非 PlayerUnit 的 UnitAny* 全局，就是"当前查看/悬停的对象"。
         "CurrentViewItem": 0x6FBCBC38,
-        # ⚠️ 以下两个**不是**指针（2026-09-19 实测修正，此前误判）：
-        #   GetSelectedUnit(0x6FB01A80) 函数体 =
-        #       A1 F4 C2 BC 6F   mov eax,[0x6FBCC2F4]
-        #       85 C0 / 74 53    test eax,eax ; je -> return 0   ← 非 0 才继续，不是返回它
-        #       ...              按鼠标坐标查 room 再查 unit（命中返回 unit，否则清零下面两个）
-        #       C7 05 F8 C2 BC 6F 0 / C7 05 F4 C2 BC 6F 0
-        #   即 0x11C2F4/0x11C2F8 是"缓存有效/需重算"标志，实测值为 0 或 1，**不可当指针解引用**。
-        "SelectedUnitFlag": 0x6FBCC2F4,
-        "SelectedUnitFlag2": 0x6FBCC2F8,
+        # ★ 鼠标指向单位的**直接指针**（UnitAny*）—— 2026-09-20 用户实测修正
+        #   ⚠️ 此前判为"标志位"是错的（当时没悬停任何东西，读到 0 就下了结论）。
+        #   实测：+0x11C2F4 悬停 NPC / 世界对象时指向该 UnitAny；
+        #         +0x11C2F8 只在鼠标落在**地面物品名文本框**上时指向该物品 UnitAny。
+        #   GetSelectedUnit(0x6FB01A80) 里 `mov eax,[0x6FBCC2F4]; test eax,eax; je->return 0`
+        #   是"缓存命中才继续"，结尾 `mov [0x6FBCC2F8],0 / mov [0x6FBCC2F4],0` 是**清空缓存**
+        #   ⇒ 清 0 的只能是指针，不是标志。
+        "SelectedUnitPtr": 0x6FBCC2F4,
+        "SelectedUnit2Ptr": 0x6FBCC2F8,
         # ★ 悬停单位的 (unitId, 类型) —— GetSelectedUnit 就是用这两个去查 unit 表的：
         #   mov edx,[0x6FBC964C]; shl edx,9; add edx,0x6FBBA608   ← 块索引 = 类型
         #   mov ecx,[0x6FBC9638]; and eax,0x7F                    ← 桶索引 = unitId & 0x7F
@@ -278,8 +278,11 @@ VARS: dict[str, dict[str, int]] = {
         # 含仓库/背包 UI 内的物品）；指向地面或空处时为 0。
         # 这是比 D2CLIENT 侧 (unitId, 类型) 更干净的悬停开关：移开立即归零，
         # 不会出现「地面 tile 闪一帧」，也不会在 UI 打开时残留上一个世界对象。
-        # ⚠️ +0xCA658 / +0xCA65C 不是指针，是悬停框的屏幕坐标（整数，
-        #    实测 637~724 / 570~628）；+0xCA66C/+0xCA670 疑似宽高（109/99，待确认）。
+        # ⚠️ +0xCA658 / +0xCA65C **不是指针**，是悬停框的**屏幕坐标 (x, y)**（整数）：
+        #    左右移动鼠标只有 x 变、上下移动只有 y 变（2026-09-20 用户实测）；
+        #    对象挪到画面左上角时 xy 均为个位数 ⇒ 以**客户区左上角**为原点
+        #    （不含窗口标题栏/边框，即 D2 的 800x600 画面坐标系）。
+        #    +0xCA66C/+0xCA670 疑似宽高（109/99，待确认）。
         "HoverFlag": 0x6F9AA664,
         "HoverX": 0x6F9AA658,
         "HoverY": 0x6F9AA65C,

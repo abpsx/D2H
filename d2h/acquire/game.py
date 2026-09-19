@@ -356,10 +356,12 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
       默认用它做门控（gate=True）：flag=0 时直接判「无悬停对象」，不解析 ptr。
       ⇒ 解决了两个历史现象：移开瞬间闪出地面 tile、UI 打开时残留上一个世界对象。
 
-    单位来源优先级（flag=1 时）：
-      1) CurrentViewItem(0x11BC38) —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
-      2) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 函数体真正用于查表的那组，反查 unit 表
-      3) (SelectedUnitFlag 0x11C2F4, Flag2 0x11C2F8) —— 另一组（实测悬停玩家时 id=1），同样反查
+    单位来源优先级（flag=1 时，前两条是**直接指针**，最快也最准）：
+      1) SelectedUnit2Ptr(0x11C2F8) —— 只在鼠标落在**地面物品名文本框**上时指向该物品
+      2) SelectedUnitPtr(0x11C2F4)  —— 悬停 NPC / 世界对象（物件、怪物）时指向该 UnitAny
+      3) CurrentViewItem(0x11BC38)  —— UI（背包/仓库/商店）内的物品
+      4) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 兜底：反查 unit 表
+    指针会做合法性校验（类型 0..5、unitId 非 0），校验失败自动退到下一条。
     """
     cb = bases.get("D2CLIENT")
     out: dict = {"ptr": None, "source": "", "name": "", "flag": None,
@@ -384,35 +386,50 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
     def rd(key: str):
         return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
 
-    out["sel_id"] = rd("SelectedUnitFlag")
-    out["sel_type"] = rd("SelectedUnitFlag2")
+    def rd(key: str):
+        return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
+
+    out["sel_ptr"] = rd("SelectedUnitPtr")
+    out["sel2_ptr"] = rd("SelectedUnit2Ptr")
     out["hover_id"] = rd("HoverUnitId")
     out["hover_type"] = rd("HoverUnitType")
     out["view_item"] = rd("CurrentViewItem")
+
+    def _try_ptr(p: int, tag: str) -> bool:
+        """校验并把 p 当成 UnitAny* 采信；非法返回 False（指针可能已失效）。"""
+        if not p or p < 0x10000 or p > 0x7FFFFFFF:
+            return False
+        t = proc.read_uint(handle, p + 0x00, 4)
+        uid = proc.read_uint(handle, p + 0x0C, 4)
+        if t is None or t > 5 or not uid:
+            return False
+        out["ptr"] = p
+        out["source"] = f"{tag} 0x{p:08X}"
+        return True
 
     # 悬停开关门控：flag=0 ⇒ 明确没有可交互对象（值再旧也不采信）
     if gate and out["flag"] == 0:
         out["source"] = "无悬停对象(HoverFlag=0)"
         return out
 
-    if out["view_item"]:
-        out["ptr"] = out["view_item"]
-        out["source"] = "CurrentViewItem(+0x11BC38)"
-    else:
-        # UI 打开时鼠标不在世界画面，(unitId, 类型) 停在最后交互的世界对象上
-        # （典型：点储藏箱进仓库后一直显示"储藏箱"）。此时绝不回退反查。
-        blocked = hover_blocked_by_ui(handle, bases)
-        if blocked:
-            out["source"] = f"UI 打开中({'/'.join(blocked)})：鼠标在界面上，无指向物品"
-            return out
-        for kid, kt in (("hover_id", "hover_type"), ("sel_id", "sel_type")):
-            uid, ut = out[kid], out[kt]
-            if uid and ut is not None and ut <= 5:
-                p = find_unit_by_id(handle, bases, uid, ut)
-                if p:
-                    out["ptr"] = p
-                    out["source"] = f"{kid}=0x{uid:X} type={ut} → unit 表反查"
-                    break
+    # 1) 地面物品名文本框（专属）  2) NPC / 世界对象  3) UI 内物品
+    if not _try_ptr(out["sel2_ptr"], "SelectedUnit2Ptr(+0x11C2F8 地面物品)"):
+        if not _try_ptr(out["sel_ptr"], "SelectedUnitPtr(+0x11C2F4)"):
+            if not _try_ptr(out["view_item"], "CurrentViewItem(+0x11BC38)"):
+                # UI 打开时鼠标不在世界画面，(unitId, 类型) 停在最后交互的世界对象上
+                # （典型：点储藏箱进仓库后一直显示"储藏箱"）。此时绝不回退反查。
+                blocked = hover_blocked_by_ui(handle, bases)
+                if blocked:
+                    out["source"] = (f"UI 打开中({'/'.join(blocked)})："
+                                     f"鼠标在界面上，无指向物品")
+                    return out
+                uid, ut = out["hover_id"], out["hover_type"]
+                if uid and ut is not None and ut <= 5:
+                    p = find_unit_by_id(handle, bases, uid, ut)
+                    if p:
+                        out["ptr"] = p
+                        out["source"] = (f"hover_id=0x{uid:X} type={ut} "
+                                         f"-> unit 表反查")
 
     p = out["ptr"]
     if p:

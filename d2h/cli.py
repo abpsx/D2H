@@ -731,7 +731,7 @@ def cmd_hover(args) -> int:
         LOGGER.error("打开进程失败: %s", e)
         return 1
     watch = getattr(args, "watch", False)
-    interval = getattr(args, "interval", 0.5) or 0.5
+    interval = getattr(args, "interval", 0.15) or 0.15
     try:
         bases = off.collect_module_bases(handle)
         cb = bases.get("D2CLIENT")
@@ -748,43 +748,38 @@ def cmd_hover(args) -> int:
         if gate:
             print("（悬停开关：D2WIN+0xCA664 HoverFlag —— 0 即判无悬停对象，"
                   "地面/空处不再误报；加 --no-gate 关闭）")
+        print("（不再去抖：HoverFlag=1 当帧即取指针，换对象立刻更新；"
+              f"采样间隔 {interval}s）")
         last_key = None
         had = False        # 上一状态是否「有悬停对象」
-        none_run = 0       # 连续 flag=0 的采样数
         first = True       # 首次采样必打印状态（单次读数也总有输出）
         rc = 0
-        # 去抖只用于「移开」：flag=0 需连续 2 次才宣布，避免落单帧抖动
-        none_need = 2 if (watch and not getattr(args, "no_debounce", False)) else 1
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
         deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
             u = gm.read_hover_unit(handle, bases, gate=gate)
             flag = u.get("flag")
             if gate and flag == 0:
-                # 权威开关说没有可交互对象 —— 旧值（view_item / hover_id）一律不采信
-                none_run += 1
-                # 首帧不去抖（否则单次读数可能整轮无输出）
-                need = 1 if first else none_need
-                if none_run >= need and (had or first):
+                # 权威开关说没有可交互对象 —— 旧值一律不采信（不再等第二帧确认）
+                if had or first:
                     stamp = datetime.now().strftime("%H:%M:%S")
+                    old = (f"  旧值 id=0x{u.get('hover_id') or 0:X} "
+                           f"type={u.get('hover_type')}" if u.get("hover_id") else "")
                     if had:
-                        print(f"[{stamp}] 已移开（HoverFlag=0）  "
-                              f"旧值 id=0x{u.get('hover_id') or 0:X} "
-                              f"type={u.get('hover_type')} —— 不采信")
+                        print(f"[{stamp}] 已移开（HoverFlag=0）{old} —— 不采信")
                     else:
-                        print(f"[{stamp}] 无悬停对象（HoverFlag=0）"
-                              + (f"  旧值 id=0x{u.get('hover_id') or 0:X} "
-                                 f"type={u.get('hover_type')}" if u.get("hover_id") else ""))
+                        print(f"[{stamp}] 无悬停对象（HoverFlag=0）{old}")
                     had = False
                     last_key = None
             else:
-                none_run = 0
                 key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"))
-                if key != last_key:
+                if key != last_key or getattr(args, "raw", False):
                     stamp = datetime.now().strftime("%H:%M:%S")
                     print(f"[{stamp}] HoverFlag={flag} 框坐标=({u.get('hx')},{u.get('hy')})  "
                           f"悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
-                          f"CurrentViewItem=0x{u['view_item'] or 0:08X}")
+                          f"Sel=0x{u['sel_ptr'] or 0:08X} "
+                          f"Sel2=0x{u['sel2_ptr'] or 0:08X} "
+                          f"ViewItem=0x{u['view_item'] or 0:08X}")
                     if not u.get("ptr"):
                         if u.get("source"):
                             print(f"  {u['source']}")
@@ -1092,7 +1087,7 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("13", "查看游戏内 UI 面板（一次性读数）", ["ui"]),
     ("14", "向游戏投递按键（i/q/c/t/esc，仅窗口消息不写内存）", None),
     ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数）", ["hover"]),
-    ("16", "鼠标指向对象监听（0.5 秒轮询，悬停开关门控，Ctrl+C 结束）",
+    ("16", "鼠标指向对象监听（0.15 秒轮询，无去抖，悬停开关门控，Ctrl+C 结束）",
      ["hover", "--watch"]),
     ("17", "定位鼠标指向指针（差异扫描 30 秒：期间把鼠标移到 NPC/物品上并停住）",
      ["hover", "--scan"]),
@@ -1347,16 +1342,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="持续监听，只在指向对象变化时打印（Ctrl+C 退出）",
     )
     hp.add_argument(
-        "--interval", type=float, default=0.5,
-        help="--watch / --scan 的轮询间隔秒数（默认 0.5）",
+        "--interval", type=float, default=0.15,
+        help="--watch / --scan 的轮询间隔秒数（默认 0.15）",
     )
     hp.add_argument(
         "--scan", action="store_true",
         help="差异扫描：持续采样并找出变成 UnitAny 指针的全局地址（需同时把鼠标移到对象上）",
     )
     hp.add_argument(
-        "--no-debounce", action="store_true",
-        help="--watch 关闭去抖（默认：移开需连续 2 次采样才宣布，滤掉单帧抖动）",
+        "--raw", action="store_true",
+        help="--watch 每帧都打印（不看变化），用于肉眼核对 Sel/Sel2/ViewItem 原始值",
     )
     hp.add_argument(
         "--no-gate", action="store_true",
