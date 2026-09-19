@@ -870,6 +870,56 @@ def _num(v, hexa: bool = False, width: int = 0) -> str:
     return str(v)
 
 
+def _print_item_display_name(handle, p: int, namer) -> None:
+    """悬停到物品(type=4)时，拼出**完整显示名**：部件全列，每项都带出处。
+
+    ★ 规范 §12：不裁剪、不隐藏 —— 拿不到的部件打 `-`，不因为"看起来没用"而少打。
+    拼接规则见 `itemprops.ItemProps.display_name()`；这里只负责呈现，
+    并且**同时给「空格连接 / 无空格」两种变体**，最终以游戏自绘的悬停文本框为准。
+    """
+    props = getattr(namer, "props", None)
+    if props is None:
+        print("  ---- 完整显示名（本帧跳过：词缀解析器不可用）----")
+        return
+    try:
+        dn = props.display_name(p, getattr(namer, "itab", None))
+    except Exception as e:  # noqa: BLE001  解析失败不能打断监听
+        print(f"  ---- 完整显示名（解析异常，已忽略：{e!r}）----")
+        return
+    print("  ---- 完整显示名（程序按 D2 取名规则拼接；与上方悬停文本对照）----")
+    print(f"  底材            = {dn.get('base') or '-'}    "
+          f"[{dn.get('base_src') or '-'}]  代码={dn.get('code') or '-'}")
+    print(f"  品质            = {dn.get('quality')} {dn.get('quality_cn')}"
+          f"   归类={dn.get('kind') or '-'}")
+    parts = dn.get("parts") or {}
+    labels = [
+        ("runeword", "符文之语名      "),
+        ("quality_name", "暗金/套装名     "),
+        ("magic_prefix", "魔法前缀        "),
+        ("magic_suffix", "魔法后缀        "),
+        ("rare_prefix", "稀有名字-前缀词 "),
+        ("rare_suffix", "稀有名字-后缀词 "),
+        ("auto_prefix", "自动前缀(第三段)"),
+    ]
+    for key, label in labels:
+        pt = parts.get(key)
+        if not pt:
+            continue
+        if pt.get("row") is not None:
+            where = f"行{pt['row']} {pt['zone']} id={pt['idx']}"
+        else:
+            where = pt.get("src") or "-"
+        loc = pt.get("locale")
+        print(f"  {label}= {pt.get('name') or '-'}"
+              f"   (内部名={pt.get('internal') or '-'} locale={loc if loc is not None else '-'}"
+              f"  {where})")
+    print(f"  完整名(主推)    = {dn.get('full') or '-'}")
+    print(f"  完整名(备选)    = {dn.get('alt') or '-'}")
+    print(f"  完整名(无空格)  = {dn.get('full_tight') or '-'}")
+    for n in dn.get("notes") or []:
+        print(f"  注              = {n}")
+
+
 def _dump_hover(handle, p: int, namer=None) -> None:
     """打印 SelectedUnit 指向的单位信息（namer 提供名称解析）。"""
     from d2h.acquire import game as gm
@@ -903,6 +953,9 @@ def _dump_hover(handle, p: int, namer=None) -> None:
         raw = proc.read_bytes(handle, u["pUnitData"], 16) or b""
         name = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
         print(f"  玩家名={name}")
+    if t == 4 and namer is not None:
+        # ★ 2026-09-20 老大要求：鼠标指向物品时直接给出**完整名**（接进菜单 16 hover --watch）
+        _print_item_display_name(handle, p, namer)
 
 
 def _print_hover_frame(handle, u: dict, namer) -> None:
@@ -1479,8 +1532,9 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("12", "游戏内 UI 面板监听（0.3 秒轮询，面板开关变化才输出）", ["watch", "--ui"]),
     ("13", "查看游戏内 UI 面板（一次性读数）", ["ui"]),
     ("14", "向游戏投递按键（i/q/c/t/esc，仅窗口消息不写内存）", None),
-    ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数）", ["hover"]),
-    ("16", "鼠标指向对象监听（0.15 秒轮询，无去抖，悬停开关门控，Ctrl+C 结束）",
+    ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数；指向物品时给出**完整显示名**）",
+     ["hover"]),
+    ("16", "鼠标指向对象监听（0.15 秒轮询，无去抖；指向物品时实时给出**完整显示名**，Ctrl+C 结束）",
      ["hover", "--watch"]),
     ("17", "定位鼠标指向指针（差异扫描 30 秒：期间把鼠标移到 NPC/物品上并停住）",
      ["hover", "--scan"]),

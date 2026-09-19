@@ -36,6 +36,8 @@ class UnitNamer:
         self._itab_done = False
         self._qt = None
         self._qt_done = False
+        self._props = None
+        self._props_done = False
 
     @property
     def qt(self):
@@ -55,6 +57,23 @@ class UnitNamer:
         if self._lt is None:
             self._lt = lang.LocaleText(self.handle, self.bases)
         return self._lt
+
+    @property
+    def props(self):
+        """物品词缀 / 完整名解析器（懒构造；失败返回 None 而不是反复重试）。
+
+        2026-09-20 加：hover 指向物品时要拼完整显示名，本属性让解析器
+        在整个监听循环里复用（词缀表/字符串表都不重复定位）。
+        """
+        if not self._props_done:
+            self._props_done = True
+            try:
+                from d2h.acquire import itemprops as _ip
+
+                self._props = _ip.ItemProps(self.handle, self.bases)
+            except Exception:  # noqa: BLE001
+                self._props = None
+        return self._props
 
     @property
     def itab(self):

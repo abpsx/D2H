@@ -182,6 +182,12 @@ STAT_GROUPS = {
 # 词缀记录读不到名字时的容错上限（防止 idx 越界读到别的分配块）
 AFFIX_IDX_MAX = 4000
 
+# ItemData.dwQuality（与 items.QUALITY_NAME 同源）
+QUALITY_CN = {
+    0: "无效", 1: "低质", 2: "普通", 3: "上等", 4: "魔法", 5: "套装",
+    6: "稀有", 7: "暗金", 8: "手工", 9: "受损",
+}
+
 ITEM_FLAGS = {
     "IDENTIFIED": 0x00000010,
     "BROKEN": 0x00000100,
@@ -576,6 +582,181 @@ class ItemProps:
             "words": {"prefix": p1["primary"], "suffix": s1["primary"],
                       "prefix_alt": p2, "suffix_alt": s2},
         }
+
+    # ---------- 完整显示名（2026-09-20 新增） ----------
+    def display_name(self, p_item: int, itab=None) -> dict:
+        """拼出物品的**完整显示名**，每个部件都带出处，一个字段都不裁剪。
+
+        kind 判定顺序（与游戏里取名时一致）：
+          符文之语(flags&RUNEWORD) > 暗金(7) / 套装(5) > 稀有(6) > 魔法(4) / 手工(8) > 其它
+        拼接模板（分隔符 = 半角空格）：
+          普通/上等/低质 = 底材
+          魔法 / 手工     = 前缀 + 后缀 + 底材      ★ 实机对过答案（见下）
+          稀有           = 稀有前缀词 + 稀有后缀词 + 底材
+          暗金 / 套装     = 表名（备选：表名 + 底材）
+          符文之语       = 符文之语名 + 底材
+        ★★ 顺序**不是**英文版的「前缀 底材 后缀」：实机悬停文本框给的是
+           `燃烧之 工匠的 ☆超大型护身符` ⇒ 中文版把两个词缀都放到底材前面。
+           连接字（"之"/"的"）已含在词条本身里（`海蓝之`/`工匠的`），不需要再加。
+        返回 `full`（主推）/ `alt`（备选顺序）/ `full_tight`（无空格变体）三行，
+        最终一律**以游戏自绘的悬停文本框为准**（hover 会把两行一起打印，便于对照）。
+        """
+        out: dict = {"ok": False, "ptr": p_item, "parts": {}, "notes": [],
+                     "full": "", "full_tight": ""}
+        head = proc.read_bytes(self.handle, p_item, 0x18)
+        if not head or len(head) < 0x18:
+            return out
+        utype, txtno = struct.unpack_from("<II", head, 0)
+        pdata = _u32(head, 0x14)
+        out["unit_type"], out["txt_file_no"] = utype, txtno
+        if not pdata:
+            out["notes"].append("ItemData 指针为 0")
+            return out
+        f = read_item_fields(self.handle, pdata)
+        if not f:
+            out["notes"].append("ItemData 读不到")
+            return out
+        qual = f.get("quality", 0)
+        flags = f.get("flags", 0)
+        out["quality"], out["quality_cn"] = qual, QUALITY_CN.get(qual, str(qual))
+        out["flags"], out["file_index"] = flags, f.get("file_index")
+
+        # -- 底材名：ItemTxt 现表 +0xF4 -> 内存字符串表 --
+        code, base, bsrc = "", "", "-"
+        if itab is not None and getattr(itab, "ptr", 0):
+            rec = itab.read(txtno)
+            if rec:
+                code = rec.get("code") or ""
+                wloc = rec.get("locale")
+                base = self.loc(wloc) or ""
+                bsrc = f"ItemTxt[{txtno}]+0xF4 -> 字符串表 #{wloc}"
+        if not base and code:
+            try:
+                from d2h.acquire import items as _items
+
+                base = _items.code_to_name(code) or ""
+                if base:
+                    bsrc = "vcb(兜底)"
+            except Exception:  # noqa: BLE001
+                pass
+        out["code"], out["base"], out["base_src"] = code, base, bsrc
+        parts: dict = out["parts"]
+        parts["base"] = {"name": base, "src": bsrc}
+
+        runeword = bool(flags & ITEM_FLAGS["RUNEWORD"])
+        mp_list = list(f.get("magic_prefix") or [])
+        ms_list = list(f.get("magic_suffix") or [])
+
+        def put(key, res, label):
+            if not res or not res.get("primary"):
+                return ""
+            rec = res["primary"]
+            parts[key] = {
+                "name": rec.get("name") or "", "internal": rec.get("internal") or "",
+                "idx": res["idx"], "row": res["idx"] - 1, "zone": res["zone"],
+                "label": label, "locale": rec.get("locale"),
+            }
+            return rec.get("name") or ""
+
+        rw_name = ""
+        if runeword and mp_list:
+            rid = mp_list[0]
+            rw_name = self.loc(rid)
+            parts["runeword"] = {"name": rw_name, "locale": rid,
+                                 "src": "ItemData+0x38[0] 是**符文之语名 locale id**（非词缀）"}
+            out["notes"].append("符文之语物品：wMagicPrefix[0] 是符文之语名 locale id，"
+                                "已从词缀解析中剔除（原始值另存 magic_prefix_raw）")
+            mp_list = [0] + mp_list[1:]
+
+        # 暗金 / 套装名（表名），索引 = ItemData.dwFileIndex
+        qname = ""
+        if qual in (5, 7):
+            try:
+                from d2h.acquire import items as _items
+
+                qn = _items.QualityNameTables(self.handle, self.bases).locale(
+                    qual, f.get("file_index"))
+                if qn:
+                    qname = self.loc(qn[0])
+                    parts["quality_name"] = {
+                        "name": qname, "locale": qn[0], "label": qn[1],
+                        "src": f"{qn[1]}表[dwFileIndex={f.get('file_index')}]+locale id",
+                    }
+            except Exception:  # noqa: BLE001
+                pass
+
+        mpre = put("magic_prefix", self._resolve("MagicPrefix", mp_list[0] if mp_list else 0),
+                   "魔法前缀")
+        msuf = put("magic_suffix", self._resolve("MagicSuffix", ms_list[0] if ms_list else 0),
+                   "魔法后缀")
+        put("auto_prefix", self._resolve("AutoPrefix", f.get("auto_prefix") or 0),
+            "自动前缀(第三段)")
+        rpre = put("rare_prefix", self._resolve("RarePrefix", f.get("rare_prefix") or 0),
+                   "稀有名字-前缀词")
+        rsuf = put("rare_suffix", self._resolve("RareSuffix", f.get("rare_suffix") or 0),
+                   "稀有名字-后缀词")
+
+        def tight(*xs) -> str:
+            return "".join(x for x in xs if x)
+
+        def j(*xs) -> str:
+            return " ".join(x for x in xs if x)
+
+        # ★★ 顺序已**实机对过答案**（2026-09-20）：悬停文本框给出
+        #    `燃烧之 工匠的 ☆超大型护身符 (82)` ⇒ 中文版是「前缀 后缀 底材」，
+        #    不是英文版的「前缀 底材 后缀」。备选行留英文顺序作对照。
+        if runeword:
+            kind = "符文之语"
+            full, alt = j(rw_name, base), j(base, rw_name)
+            tight_s = tight(rw_name, base)
+        elif qual in (5, 7):
+            kind = "暗金" if qual == 7 else "套装"
+            full, alt = qname, j(qname, base)
+            tight_s = tight(qname)
+        elif qual == 6:
+            kind = "稀有"
+            full, alt = j(rpre, rsuf, base), j(rpre, base, rsuf)
+            tight_s = tight(rpre, rsuf, base)
+        elif qual in (4, 8):
+            kind = "魔法" if qual == 4 else "手工"
+            full, alt = j(mpre, msuf, base), j(mpre, base, msuf)
+            tight_s = tight(mpre, msuf, base)
+        else:
+            kind = "普通/上等/低质"
+            full, alt, tight_s = base, base, base
+        out["alt"] = alt
+        if qual in (4, 8):
+            out["notes"].append(
+                "名字顺序=「前缀 后缀 底材」：**实机对过答案**（悬停文本框 "
+                "`燃烧之 工匠的 ☆超大型护身符`）。备选行是英文版顺序，未验证。")
+        elif qual == 6:
+            out["notes"].append(
+                "稀有名字顺序=「前缀词 后缀词 底材」（与已对答案的魔法物品同序，**本类未单独验证**）")
+        elif qual in (5, 7):
+            out["notes"].append(
+                "暗金/套装主推**纯表名**，备选=表名+底材；两种都未实机对答案")
+        elif runeword:
+            out["notes"].append(
+                "符文之语主推「符文之语名 底材」（D2 英文惯例，如 Spirit Monarch），未实机对答案")
+        if parts.get("auto_prefix") and not runeword and qual not in (4, 8):
+            out["notes"].append(
+                "该物品带**自动前缀**（automagic，第三段表）：游戏取名时是否入名**未验证**，"
+                "这里只作部件列出，不擅自拼进去")
+        if qual == 6:
+            out["notes"].append(
+                "D2 稀有物品取名规则：`稀有前缀词 + 稀有后缀词 + 底材`（上面 rare_prefix/rare_suffix）；"
+                "同列的 magic_prefix/suffix 是该稀有物品的**隐藏 mod 词缀**，只影响属性、**不进名字**")
+        if qual == 3:
+            out["notes"].append("上等品质：游戏可能在底材前再加质量词（如「上等的」/ Superior），"
+                                "本函数**没有拼**这一层，待实机核对")
+        if qual == 1:
+            out["notes"].append("低质品质：游戏通常在前加质量词（如「破裂的」/ Crude），本函数**没有拼**")
+        if qual not in (4, 8, 6, 5, 7) and any([mp_list and mp_list[0], ms_list and ms_list[0]]):
+            out["notes"].append(
+                "该品质下 ItemData 的 magic_prefix/suffix 数组**不入名**（上面照原始值打印，"
+                "游戏只在魔法/手工品取名时读这两组）")
+        out.update({"ok": bool(full), "kind": kind, "full": full, "full_tight": tight_s})
+        return out
 
 
 # ==================== 便捷函数 ====================
