@@ -348,6 +348,27 @@ def hover_blocked_by_ui(handle: int, bases: dict[str, int]) -> list[str]:
         return []
 
 
+def read_hover_text(handle: int, bases: dict[str, int], limit: int = 256) -> str:
+    """读 D2WIN 悬停提示框**正在显示的文字**（wchar 缓冲 @ D2WIN+0xC9E58）。
+
+    权威偏移来自只读 dump `D2WIN.DrawHoverText`：它把 x/y/透明度/颜色写进框结构体
+    （`+0xCA658~`），把**文本本身**拷进 `0x6F9A9E58`（2KB 缓冲，`DrawHover` 从那儿取来画）。
+
+    ⚠️ 这条链路**不依赖任何 UnitAny 指针** —— 所以鼠标停在「地面物品名文本框」这类
+    拿不到单位的场景时，仍然能把游戏显示的那行字读出来。
+    返回已用 `lang.strip_color()` 清洗掉 `ÿcX` 颜色符的文本；读不到返回 ""。
+    """
+    from d2h.acquire import lang
+
+    dw = bases.get("D2WIN")
+    if not dw:
+        return ""
+    addr = dw + (off.VARS["D2WIN"]["HoverTextBuf"] - off.DLLBASE["D2WIN"])
+    raw = proc.read_bytes(handle, addr, min(limit, 0x400) * 2) or b""
+    s = raw.decode("utf-16-le", "ignore").split("\x00", 1)[0]
+    return lang.strip_color(s).strip() if s else ""
+
+
 def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> dict:
     """读取鼠标当前指向的单位（只读）。返回 dict，读不到的字段为 None。
 
@@ -356,16 +377,17 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
       默认用它做门控（gate=True）：flag=0 时直接判「无悬停对象」，不解析 ptr。
       ⇒ 解决了两个历史现象：移开瞬间闪出地面 tile、UI 打开时残留上一个世界对象。
 
-    单位来源优先级（flag=1 时，前两条是**直接指针**，最快也最准）：
-      1) SelectedUnit2Ptr(0x11C2F8) —— 只在鼠标落在**地面物品名文本框**上时指向该物品
-      2) SelectedUnitPtr(0x11C2F4)  —— 悬停 NPC / 世界对象（物件、怪物）时指向该 UnitAny
-      3) CurrentViewItem(0x11BC38)  —— UI（背包/仓库/商店）内的物品
-      4) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 兜底：反查 unit 表
+    单位来源优先级（flag=1 时）：
+      1) CurrentViewItem(0x11BC38)  —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
+      2) SelectedUnitFlag(0x11C2F4) / Flag2(0x11C2F8) —— ⚠️ **实测是标记不是指针**，
+         这里只是留一道 `_try_ptr()` 校验（真成指针时自动用上，否则跳过）
+      3) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 兜底：反查 unit 表
+     4) D2WIN+0xC9E58 悬停文本 —— 拿不到单位时（地面物品名文本框）仍能报出游戏显示的字
     指针会做合法性校验（类型 0..5、unitId 非 0），校验失败自动退到下一条。
     """
     cb = bases.get("D2CLIENT")
     out: dict = {"ptr": None, "source": "", "name": "", "flag": None,
-                 "hx": None, "hy": None}
+                 "hx": None, "hy": None, "text": ""}
     if not cb:
         return out
     v = off.VARS["D2CLIENT"]
@@ -382,6 +404,7 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
         out["flag"] = rdw("HoverFlag")
         out["hx"] = rdw("HoverX")
         out["hy"] = rdw("HoverY")
+        out["text"] = read_hover_text(handle, bases)
 
     def rd(key: str):
         return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
@@ -389,8 +412,8 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
     def rd(key: str):
         return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
 
-    out["sel_ptr"] = rd("SelectedUnitPtr")
-    out["sel2_ptr"] = rd("SelectedUnit2Ptr")
+    out["sel_ptr"] = rd("SelectedUnitFlag")
+    out["sel2_ptr"] = rd("SelectedUnitFlag2")
     out["hover_id"] = rd("HoverUnitId")
     out["hover_type"] = rd("HoverUnitType")
     out["view_item"] = rd("CurrentViewItem")
@@ -412,10 +435,10 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
         out["source"] = "无悬停对象(HoverFlag=0)"
         return out
 
-    # 1) 地面物品名文本框（专属）  2) NPC / 世界对象  3) UI 内物品
-    if not _try_ptr(out["sel2_ptr"], "SelectedUnit2Ptr(+0x11C2F8 地面物品)"):
-        if not _try_ptr(out["sel_ptr"], "SelectedUnitPtr(+0x11C2F4)"):
-            if not _try_ptr(out["view_item"], "CurrentViewItem(+0x11BC38)"):
+    # 1) UI 内/地上的物品  2)+3) 两个"选中标记"（实测是标记，校验基本会跳过）
+    if not _try_ptr(out["view_item"], "CurrentViewItem(+0x11BC38)"):
+        if not _try_ptr(out["sel_ptr"], "SelectedUnitFlag(+0x11C2F4)"):
+            if not _try_ptr(out["sel2_ptr"], "SelectedUnitFlag2(+0x11C2F8)"):
                 # UI 打开时鼠标不在世界画面，(unitId, 类型) 停在最后交互的世界对象上
                 # （典型：点储藏箱进仓库后一直显示"储藏箱"）。此时绝不回退反查。
                 blocked = hover_blocked_by_ui(handle, bases)

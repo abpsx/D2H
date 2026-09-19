@@ -777,16 +777,22 @@ def cmd_hover(args) -> int:
                     stamp = datetime.now().strftime("%H:%M:%S")
                     print(f"[{stamp}] HoverFlag={flag} 框坐标=({u.get('hx')},{u.get('hy')})  "
                           f"悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
-                          f"Sel=0x{u['sel_ptr'] or 0:08X} "
-                          f"Sel2=0x{u['sel2_ptr'] or 0:08X} "
+                          f"SelFlag={u['sel_ptr']} SelFlag2={u['sel2_ptr']} "
                           f"ViewItem=0x{u['view_item'] or 0:08X}")
+                    txt = u.get("text") or ""
                     if not u.get("ptr"):
                         if u.get("source"):
                             print(f"  {u['source']}")
                         else:
                             print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
+                        if txt:
+                            print(f"  悬停文本={txt}")
+                            print("    ^ 游戏此刻显示的那行字（D2WIN+0xC9E58，不依赖单位指针；"
+                                  "地面物品名文本框这类取不到单位的场景靠它）")
                     else:
                         print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
+                        if txt:
+                            print(f"  悬停文本={txt}")
                         _dump_hover(handle, u["ptr"], namer)
                     last_key = key
                     had = True

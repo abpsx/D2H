@@ -201,15 +201,16 @@ VARS: dict[str, dict[str, int]] = {
         #   D2VARPTR2(D2CLIENT, 0x6FBCBC38, ..., CurrentViewItem, UnitAny*) // 选择显示的物品
         #   hackmap 里**唯一**一个非 PlayerUnit 的 UnitAny* 全局，就是"当前查看/悬停的对象"。
         "CurrentViewItem": 0x6FBCBC38,
-        # ★ 鼠标指向单位的**直接指针**（UnitAny*）—— 2026-09-20 用户实测修正
-        #   ⚠️ 此前判为"标志位"是错的（当时没悬停任何东西，读到 0 就下了结论）。
-        #   实测：+0x11C2F4 悬停 NPC / 世界对象时指向该 UnitAny；
-        #         +0x11C2F8 只在鼠标落在**地面物品名文本框**上时指向该物品 UnitAny。
-        #   GetSelectedUnit(0x6FB01A80) 里 `mov eax,[0x6FBCC2F4]; test eax,eax; je->return 0`
-        #   是"缓存命中才继续"，结尾 `mov [0x6FBCC2F8],0 / mov [0x6FBCC2F4],0` 是**清空缓存**
-        #   ⇒ 清 0 的只能是指针，不是标志。
-        "SelectedUnitPtr": 0x6FBCC2F4,
-        "SelectedUnit2Ptr": 0x6FBCC2F8,
+        # ★ `+0x11C2F4` / `+0x11C2F8` = **标记（不是指针）** —— 2026-09-20 老大实机拍板：
+        #   指针形态始终没出现过（悬停时也只是 0/1），且 log 只对**地面物体本体**响应，
+        #   **不对地面物品名文本框响应**。早期误当指针解引用导致崩溃。
+        #   GetSelectedUnit(0x6FB01A80) 里 `mov eax,[0x6FBCC2F4]; test eax,eax; je -> 0`
+        #   是"有选中才继续查"的条件，结尾 `C7 05 ...,0` 把两个一起清 0（标志或缓存都这么写）。
+        # ⇒ 现在只作**诊断信息打印**；`read_hover_unit()` 里仍过一遍 `_try_ptr()` 校验，
+        #   万一将来某个版本真存了指针也能自动用上，但不会再因它崩或误报。
+        #   真正解决"地面物品名文本框"的是 **D2WIN+0xC9E58 悬停文本**（见 D2WIN 段）。
+        "SelectedUnitFlag": 0x6FBCC2F4,
+        "SelectedUnitFlag2": 0x6FBCC2F8,
         # ★ 悬停单位的 (unitId, 类型) —— GetSelectedUnit 就是用这两个去查 unit 表的：
         #   mov edx,[0x6FBC964C]; shl edx,9; add edx,0x6FBBA608   ← 块索引 = 类型
         #   mov ecx,[0x6FBC9638]; and eax,0x7F                    ← 桶索引 = unitId & 0x7F
@@ -278,16 +279,32 @@ VARS: dict[str, dict[str, int]] = {
         # 含仓库/背包 UI 内的物品）；指向地面或空处时为 0。
         # 这是比 D2CLIENT 侧 (unitId, 类型) 更干净的悬停开关：移开立即归零，
         # 不会出现「地面 tile 闪一帧」，也不会在 UI 打开时残留上一个世界对象。
+        #
+        # ★ 结构体布局由 **只读 dump D2WIN.DrawHoverText(D2WIN+0x118F0)** 钉死（2026-09-20）：
+        #   6F8F1933  89 1D 58 A6 9A 6F   mov [0x6F9AA658], ebx   ; xPos
+        #   6F8F1939  A3 5C A6 9A 6F      mov [0x6F9AA65C], eax   ; yPos
+        #   6F8F193E  89 0D 60 A6 9A 6F   mov [0x6F9AA660], ecx   ; dwTran（透明度）
+        #   6F8F1944  89 15 64 A6 9A 6F   mov [0x6F9AA664], edx   ; dwColor（颜色/有效位）
+        #   6F8F194A  C7 05 68 A6 9A 6F 0 mov [0x6F9AA668], 0
+        #   ⇒ 整块只有 0x28 字节（0xCA658~0xCA680），后面 0xCA66C/670/674/678 是框的矩形。
         # ⚠️ +0xCA658 / +0xCA65C **不是指针**，是悬停框的**屏幕坐标 (x, y)**（整数）：
         #    左右移动鼠标只有 x 变、上下移动只有 y 变（2026-09-20 用户实测）；
         #    对象挪到画面左上角时 xy 均为个位数 ⇒ 以**客户区左上角**为原点
         #    （不含窗口标题栏/边框，即 D2 的 800x600 画面坐标系）。
-        #    +0xCA66C/+0xCA670 疑似宽高（109/99，待确认）。
-        "HoverFlag": 0x6F9AA664,
         "HoverX": 0x6F9AA658,
         "HoverY": 0x6F9AA65C,
-        "HoverW": 0x6F9AA66C,
-        "HoverH": 0x6F9AA670,
+        "HoverTran": 0x6F9AA660,
+        "HoverFlag": 0x6F9AA664,
+        "HoverRectL": 0x6F9AA66C,     # 实到 109/99，疑似 right/bottom 或宽高，待确认
+        "HoverRectT": 0x6F9AA670,
+        "HoverRectR": 0x6F9AA674,
+        "HoverRectB": 0x6F9AA678,
+        # ★ 悬停**文本内容**（wchar 缓冲，最长 0x400 字符 = 2KB）—— 权威偏移来自
+        #   DrawHoverText 里 `mov ecx,0x6F9A9E58` / `mov edi,0x6F9A9E58`（rep stosd 清零 2KB）
+        #   以及 DrawHover(D2WIN+0x133A0) 里 `mov eax,0x6F9A9E58` 读它来画。
+        #   ⇒ 悬停任何东西时，游戏**正在显示的这段字**我们都能直接读出来（含颜色符 ÿcX）。
+        #   ⚠️ 别和上面的框结构体搞混：框在 +0xCA658，文本在 +0xC9E58。
+        "HoverTextBuf": 0x6F9A9E58,
     },
     "D2NET": {
         "UnkNetFlag": 0x6FBFB244,
