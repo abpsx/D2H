@@ -685,7 +685,7 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
     print(f"[{stamp}] ==== 悬停对象完整结构 ====")
     # ---- D2WIN 侧：与单位指针无关的原始观测量 ----
     print(f"  D2WIN+0xCA664    HoverFlag        = {_num(u.get('flag'))}"
-          "    (1=有可交互对象 / 0=无)")
+          "    (⚠️ 实测地面物品悬停时也可为 0，不作判据，仅供对照)")
     print(f"  D2WIN+0xCA658    框坐标 x         = {_num(u.get('hx'))}")
     print(f"  D2WIN+0xCA65C    框坐标 y         = {_num(u.get('hy'))}")
     txt = u.get("text") or ""
@@ -726,8 +726,8 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
             print(f"  [旧值对照] 若不做门控会解析成 UnitAny=0x{stale['ptr']:08X} "
                   f"类型={_num(stale.get('unit_type'))} txt={_num(stale.get('txt'))} "
                   f"名称={nm or '-'}")
-            print("             ^ HoverFlag=0 时这是**陈旧值**（鼠标已不在对象上），"
-                  "判定不采信，仅供对照")
+            print("             ^ 仅供对照（--gate 开启时判定不采信）；"
+                  "默认无门控时这行不会出现")
         return
     print(f"  UnitAny          = 0x{p:08X}")
     _dump_hover(handle, p, namer)
@@ -868,14 +868,15 @@ def cmd_hover(args) -> int:
                                     interval, lo, hi)
         # 命名器：字符串表只构造一次，供整个监听循环复用
         namer = _names.UnitNamer(handle, bases)
-        gate = not getattr(args, "no_gate", False)
+        gate = getattr(args, "gate", False)
+        print("（★ 2026-09-20 起**默认不做门控**：实测鼠标悬停地面物品时 "
+              "D2WIN+0xCA664 HoverFlag = 0，而 HoverUnitId/Type 反查出的单位是对的 "
+              "—— 门控会把真值屏蔽成空，故该位现在只作读数打印；加 --gate 恢复旧行为）")
         if gate:
-            print("（悬停开关：D2WIN+0xCA664 HoverFlag —— 0 即判无悬停对象，"
-                  "地面/空处不再误报；加 --no-gate 关闭）")
+            print("（当前 --gate 已开：flag=0 即判「无悬停对象」，不解析单位）")
         print("（输出 = 每次采样的完整结构：D2WIN 开关/框坐标/悬停文本 + D2CLIENT 四个原始值 + 判定；"
               "空值一律打 '-'，不做任何裁剪）")
-        print("（不再去抖：HoverFlag=1 当帧即取指针，换对象立刻更新；采样间隔 "
-              f"{interval}s）")
+        print(f"（采样间隔 {interval}s；任一字段变动即取一次完整结构并打印）")
         print("（2026-09-20 取消 UI 阻断：开着背包/仓库悬停 NPC、地面物品照样解析，"
               "面板名只作提示打印）")
         print("（按你的要求：**标记一变就取一次指针** —— flag 升降沿必然触发一次完整读数；"
@@ -1452,8 +1453,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="--watch 每帧都打印（不看变化），用于肉眼核对 Sel/Sel2/ViewItem 原始值",
     )
     hp.add_argument(
-        "--no-gate", action="store_true",
-        help="关闭悬停开关门控（默认用 D2WIN+0xCA664 HoverFlag 判定是否真有悬停对象）",
+        "--gate", action="store_true",
+        help="开启 HoverFlag 门控（默认**关闭**：实测地面物品悬停时该位=0，"
+             "门控会把正确结果屏蔽成空；仅供对照旧行为）",
     )
     hp.add_argument(
         "--seconds", type=float, default=30.0,

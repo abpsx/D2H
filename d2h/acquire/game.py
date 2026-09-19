@@ -471,13 +471,16 @@ def read_hover_text(handle: int, bases: dict[str, int], limit: int = 256) -> str
     return lang.strip_color(s).strip() if s else ""
 
 
-def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> dict:
+def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = False) -> dict:
     """读取鼠标当前指向的单位（只读）。返回 dict，读不到的字段为 None。
 
-    悬停开关（权威）：`D2WIN+0xCA664` HoverFlag
-      1 = 鼠标在可交互对象上（NPC / 物件 / 物品，含 UI 内物品）；0 = 地面/空处。
-      默认用它做门控（gate=True）：flag=0 时直接判「无悬停对象」，不解析 ptr。
-      ⇒ 解决了两个历史现象：移开瞬间闪出地面 tile、UI 打开时残留上一个世界对象。
+    悬停开关：`D2WIN+0xCA664` HoverFlag —— **只作为读数带出，默认不做门控**
+    （2026-09-20 用户实机拍板）：
+      ⚠️ **实测反例：鼠标悬停在地面物品上时该位 = 0**，但 `HoverUnitId/Type`
+      反查出来的单位**是正确的**。⇒ 它不是「当前是否有悬停对象」的可靠判据，
+      拿它当门控会把真值屏蔽成空 —— 历史 bug 正是这样：地面物品悬停时
+      「悬停结构全空，反倒是不门控的旧值是对的」。
+      `gate=True` 仅保留作旧行为对照（调试用，默认 False）。
 
     单位来源优先级（flag=1 时），每一级都过 `_try_ptr()` 校验，失败自动退到下一条：
       1) CurrentViewItem(0x11BC38)  —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
@@ -534,15 +537,11 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
         out["source"] = f"{tag} 0x{p:08X}"
         return True
 
-    # 悬停开关门控：flag=0 ⇒ 明确没有可交互对象（值再旧也不采信）
-    # ★ 但**悬停文本不看门控**：它是游戏此刻画在屏幕上的那行字，flag 不抬的场景
-    #   （典型：鼠标停在地面物品名文本框上）照样有值 ⇒ 文本非空本身就是一个悬停信号。
+    # ★★ 门控**默认关闭**：HoverFlag 在地面物品悬停时为 0（用户 2026-09-20 实机），
+    #    用它阻断会把正确结果屏蔽成空。开 `gate=True` 才走下面这段（仅旧行为对照）。
     if gate and out["flag"] == 0:
-        if out.get("text"):
-            out["source"] = ("无单位指针（HoverFlag=0），但悬停文本非空 "
-                             "-> 以文本为准")
-        else:
-            out["source"] = "无悬停对象(HoverFlag=0)"
+        out["source"] = ("无悬停对象(HoverFlag=0，门控已开启) "
+                         "—— ⚠️ 地面物品悬停时该位也可能是 0，此结论不可靠")
         return out
 
     # 1) UI 内/地上的物品  2)+3) 两个"选中标记"（实测是标记，校验基本会跳过）
