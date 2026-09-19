@@ -542,6 +542,13 @@ UNIT_TYPE_NAME: dict[int, str] = {
     0: "玩家", 1: "怪物/NPC", 2: "物件", 3: "导弹", 4: "物品", 5: "房间格子",
 }
 
+# 这些 UI 面板打开时鼠标停在界面上而非世界画面，游戏不会刷新"世界悬停"值，
+# 于是读数会停留在最后交互的对象（典型：仓库界面里一直显示储藏箱）。
+UI_BLOCKS_HOVER: set[str] = {
+    "仓库", "盒子", "商店", "NPC对话框", "传送", "任务物品提交窗",
+    "玩家交易", "佣兵装备", "背包", "赫拉迪克方块",
+}
+
 
 def _read_unit_head(handle, p: int):
     """逐字段读 UnitAny 头部（+0x00..+0x2C）。指针不可读返回 None。
@@ -585,6 +592,8 @@ def _dump_hover(handle, p: int, namer=None) -> None:
         return
     t = u["dwUnitType"]
     tname = UNIT_TYPE_NAME.get(t, f"未知({t})")
+    if t == 5:
+        print("  （地面/空地块 —— 不是有效指向对象，鼠标移开时常闪现这一帧）")
     print(f"  类型={t} {tname}  txtFileNo={_num(u['dwTxtFileNo'])}  "
           f"unitId={_num(u['dwUnitId'], True)}  mode={_num(u['dwMode'])}")
     if namer is not None:
@@ -711,6 +720,17 @@ def _scan_hover_unit(handle, cb: int, seconds: float, interval: float,
     return 0
 
 
+def _hover_blocked_ui(handle: int, bases: dict[str, int]) -> list[str]:
+    """当前打开的、会挡住世界画面的 UI 面板名（读失败返回空，不影响主流程）。"""
+    try:
+        from d2h.acquire import game as gm
+
+        ui = gm.read_ui_panels(handle, bases)
+        return [x for x in ui.get("open", []) if x in UI_BLOCKS_HOVER]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def cmd_hover(args) -> int:
     """读取鼠标当前指向的单位（UnitAny），只读。--watch 可持续监听。"""
     from d2h.acquire import game as gm
@@ -742,7 +762,12 @@ def cmd_hover(args) -> int:
         # 命名器：字符串表只构造一次，供整个监听循环复用
         namer = _names.UnitNamer(handle, bases)
         last = None
+        pending = None      # 去抖：待确认的新值
         rc = 0
+        debounce = watch and not getattr(args, "no_debounce", False)
+        if debounce:
+            print(f"（已开启去抖：新值需连续 2 次采样一致才输出，间隔 {interval}s；"
+                  f"加 --no-debounce 可关闭）")
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
         deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
@@ -750,16 +775,27 @@ def cmd_hover(args) -> int:
             key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"),
                    u.get("sel_id"), u.get("sel_type"))
             if key != last:
-                stamp = datetime.now().strftime("%H:%M:%S")
-                print(f"[{stamp}] 悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
-                      f"选中(id=0x{u['sel_id'] or 0:X} type={u['sel_type']})  "
-                      f"CurrentViewItem=0x{u['view_item'] or 0:08X}")
-                if not u.get("ptr"):
-                    print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
+                # 鼠标移开瞬间游戏会先指向"地面/空地块"再清零，只闪一帧 —— 去抖滤掉
+                if debounce and key != pending:
+                    pending = key
                 else:
-                    print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
-                    _dump_hover(handle, u["ptr"], namer)
-                last = key
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[{stamp}] 悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
+                          f"选中(id=0x{u['sel_id'] or 0:X} type={u['sel_type']})  "
+                          f"CurrentViewItem=0x{u['view_item'] or 0:08X}")
+                    if not u.get("ptr"):
+                        print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
+                    else:
+                        print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
+                        _dump_hover(handle, u["ptr"], namer)
+                        blocked = _hover_blocked_ui(handle, bases)
+                        if blocked:
+                            print(f"  （UI 打开中：{'/'.join(blocked)} —— 鼠标不在世界画面，"
+                                  f"悬停值会停留在最后交互的对象）")
+                    last = key
+                    pending = None
+            else:
+                pending = None
             if not watch:
                 break
             # 限时监听：--seconds > 0 时到点自动结束（便于非交互抓取，如脚本里跑 20 秒）
@@ -1317,6 +1353,10 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument(
         "--scan", action="store_true",
         help="差异扫描：持续采样并找出变成 UnitAny 指针的全局地址（需同时把鼠标移到对象上）",
+    )
+    hp.add_argument(
+        "--no-debounce", action="store_true",
+        help="--watch 关闭去抖（默认开启：新值需连续 2 次采样一致才输出，滤掉移开瞬间闪现的地面）",
     )
     hp.add_argument(
         "--seconds", type=float, default=30.0,

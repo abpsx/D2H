@@ -262,6 +262,7 @@ def _item_record(ua: st.UnitAny, idata: st.ItemData) -> dict:
     return {
         "type": ua.dwTxtFileNo,
         "quality": idata.dwQuality,
+        "file_index": idata.dwFileIndex,   # 暗金/套装专用：UniqueItems.txt / SetItems.txt 行号
         "ilvl": idata.dwItemLevel,
         "flags": idata.dwItemFlags,
         "location": idata.nLocation,

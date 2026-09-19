@@ -73,6 +73,54 @@ def code_to_name(code: str) -> str:
     return load_item_names().get(code.lower(), "")
 
 
+# ---- 暗金 / 套装：显示名走**另一张表**（2026-09-20 用户指出显示不对后补）----
+# 基础名（ItemTxt）对暗金/套装只是"底材名"（如"赫拉迪克之杖的转轴"），
+# 游戏真正显示的是 UniqueItems.txt / SetItems.txt 里的名字（如"国王之杖"）。
+#
+# 依据 hackmap D2CallStub.cpp:56/111（D2GetUniqueItemTxt / D2GetSetItemTxt）
+# 与 d2structs.h 的 sgptDataTables 注释：
+#   DataTables      = *(D2COMMON + 0x6FDE9E1C)            1.13c 绝对地址
+#   UniqueItemsTxt  = *(DT + 0xC24)  nUniqueItems = *(DT + 0xC28)  rec=0x14C  wLocaleTxtNo @ +0x22
+#   SetItemsTxt     = *(DT + 0xC18)  nSetItems    = *(DT + 0xC1C)  rec=0x1B8  wLocaleTxtNo @ +0x24
+# 索引 = ItemData.dwFileIndex(+0x28)；用哪张表由 dwQuality 决定（5=套装 7=暗金）。
+# 实测：DT=0x6FDEFED8、Unique n=538、Set n=127；暗金 fileIndex=124 -> locale 2698 -> "国王之杖"。
+DATA_TABLES_ABS = 0x6FDE9E1C
+# quality -> (表指针偏移, 数量偏移, 记录大小, wLocaleTxtNo 偏移, 标签)
+QUALITY_TABLE = {
+    5: (0xC18, 0xC1C, 0x1B8, 0x24, "套装名"),
+    7: (0xC24, 0xC28, 0x14C, 0x22, "暗金名"),
+}
+
+
+class QualityNameTables:
+    """暗金 / 套装名字表（DataTables 内）。取不到返回 None，绝不抛异常。"""
+
+    def __init__(self, handle: int, bases: dict[str, int]):
+        self.handle = handle
+        self.dt: int | None = None
+        b = bases.get("D2COMMON")
+        if b:
+            self.dt = proc.read_uint(
+                handle, b + (DATA_TABLES_ABS - off.DLLBASE["D2COMMON"]), 4)
+
+    def ready(self) -> bool:
+        return bool(self.dt)
+
+    def locale(self, quality: int, file_index: int | None):
+        """返回 (wLocaleTxtNo, 标签)；不适用或读不到返回 None。"""
+        if not self.dt or file_index is None or quality not in QUALITY_TABLE:
+            return None
+        base_off, cnt_off, rec, loc_off, tag = QUALITY_TABLE[quality]
+        cnt = proc.read_uint(self.handle, self.dt + cnt_off, 4) or 0
+        if not (0 <= file_index < cnt):
+            return None
+        base = proc.read_uint(self.handle, self.dt + base_off, 4)
+        if not base:
+            return None
+        loc = proc.read_uint(self.handle, base + file_index * rec + loc_off, 2)
+        return (loc, tag) if loc else None
+
+
 class ItemTextTable:
     """游戏内存中的 ItemTxt 现表（1.13c）。
 
@@ -141,18 +189,24 @@ def describe_inventory(handle: int, bases: dict[str, int], player_unit: st.UnitA
     raw = g.enumerate_inventory(handle, player_unit)
     table = ItemTextTable(handle, bases)
     lt = lang.LocaleText(handle, bases)
+    qt = QualityNameTables(handle, bases)
     out: list[dict] = []
     for it in raw:
         rec = table.read(it["type"]) if table.ptr else None
         code = rec["code"] if rec else ""
-        locale = rec["locale"] if rec else None
+        # 暗金(7)/套装(5)：优先 UniqueItems/SetItems 里的名字，否则退回 ItemTxt 底材名
+        qn = qt.locale(it.get("quality", 0), it.get("file_index"))
+        if qn:
+            locale, tag = qn
+        else:
+            locale, tag = (rec["locale"], "基础名") if rec else (None, "")
         name_mem = lt.get_clean(locale) if (lt.ready() and locale is not None) else ""
         name_vcb = code_to_name(code) if code else ""
         d = dict(it)
         d["code"] = code
         d["locale"] = locale
         d["name"] = name_mem or name_vcb or code or f"type{it['type']}"
-        d["name_src"] = "内存" if name_mem else ("vcb" if name_vcb else "代码")
+        d["name_src"] = ("内存·" + tag) if name_mem else ("vcb" if name_vcb else "代码")
         d["type_name"] = QUALITY_NAME.get(it["quality"], str(it["quality"]))
         out.append(d)
     return out

@@ -34,6 +34,21 @@ class UnitNamer:
         self._lt: lang.LocaleText | None = None
         self._itab = None
         self._itab_done = False
+        self._qt = None
+        self._qt_done = False
+
+    @property
+    def qt(self):
+        """暗金/套装名字表（懒构造）。"""
+        if not self._qt_done:
+            self._qt_done = True
+            try:
+                from d2h.acquire import items as _items
+
+                self._qt = _items.QualityNameTables(self.handle, self.bases)
+            except Exception:  # noqa: BLE001
+                self._qt = None
+        return self._qt
 
     @property
     def lt(self) -> lang.LocaleText:
@@ -111,6 +126,18 @@ class UnitNamer:
                 return "", ""
             tab = self.itab
             rec = tab.read(txt) if (tab is not None and tab.ptr) else None
+            # 暗金(7)/套装(5) 走 UniqueItems/SetItems 表，索引 = ItemData.dwFileIndex
+            qn = None
+            if pd:
+                qual = proc.read_uint(self.handle, pd + 0x00, 4)
+                fidx = proc.read_uint(self.handle, pd + 0x28, 4)
+                if self.qt is not None:
+                    qn = self.qt.locale(qual or 0, fidx)
+            if qn:
+                loc, tag = qn
+                nm = self._from_txt(loc)
+                if nm:
+                    return nm, f"{tag}(内存字符串表)"
             if rec:
                 nm = self._from_txt(rec.get("locale"))
                 if nm:
