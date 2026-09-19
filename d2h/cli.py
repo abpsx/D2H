@@ -706,6 +706,7 @@ def _scan_hover_unit(handle, cb: int, seconds: float, interval: float,
 
 def cmd_hover(args) -> int:
     """读取鼠标当前指向的单位（UnitAny），只读。--watch 可持续监听。"""
+    from d2h.acquire import game as gm
     from d2h.acquire import offsets as off
     from d2h.acquire import process as proc
 
@@ -730,24 +731,22 @@ def cmd_hover(args) -> int:
             lo, hi = args.range
             return _scan_hover_unit(handle, cb, getattr(args, "seconds", 30.0),
                                     interval, lo, hi)
-        # CurrentViewItem = hackmap d2ptrs.h 里唯一的 "当前查看/悬停对象" UnitAny*
-        addr = cb + (off.VARS["D2CLIENT"]["CurrentViewItem"] - off.DLLBASE["D2CLIENT"])
-        faddr = cb + (off.VARS["D2CLIENT"]["SelectedUnitFlag"] - off.DLLBASE["D2CLIENT"])
         last = None
         rc = 0
         while True:
-            p = proc.read_uint(handle, addr, 4)
-            flag = proc.read_uint(handle, faddr, 4)
-            key = (p, flag)
+            u = gm.read_hover_unit(handle, bases)
+            key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"),
+                   u.get("sel_id"), u.get("sel_type"))
             if key != last:
                 stamp = datetime.now().strftime("%H:%M:%S")
-                head = f"[{stamp}] CurrentViewItem @0x{addr:08X} = 0x{p:08X}" \
-                       f"   (选中标志={flag})"
-                print(head)
-                if not p:
+                print(f"[{stamp}] 悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
+                      f"选中(id=0x{u['sel_id'] or 0:X} type={u['sel_type']})  "
+                      f"CurrentViewItem=0x{u['view_item'] or 0:08X}")
+                if not u.get("ptr"):
                     print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
                 else:
-                    _dump_hover(handle, p)
+                    print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
+                    _dump_hover(handle, u["ptr"])
                 last = key
             if not watch:
                 break
@@ -758,6 +757,45 @@ def cmd_hover(args) -> int:
         return 0
     finally:
         proc.close(handle)
+
+
+def cmd_err(args) -> int:
+    """报错现场快照：列出 / 查看 / 清理（报错时由入口自动抓取）。"""
+    from d2h.snapshot import errsnap
+
+    if args.clean:
+        n = errsnap.clean_errors()
+        print(f"已删除 {n} 份错误快照")
+        return 0
+    if args.show:
+        print(errsnap.show_error(args.show))
+        return 0
+    items = errsnap.list_errors()
+    if not items:
+        print("没有错误快照（说明还没报过错，或已清理）")
+        return 0
+    print(f"共 {len(items)} 份：")
+    for it in items:
+        print(f"  {it['name']}")
+        print(f"      命令: {' '.join(it['argv']) or '(菜单)'}   pid={it['pid']}   "
+              f"状态码={it['state_code']}")
+        print(f"      {it['error']}")
+    print("\n查看明细: cli.py err --show <名字>     清空: cli.py err --clean")
+    return 0
+
+
+def _auto_errsnap(exc: BaseException, argv, args=None) -> None:
+    """报错时自动抓一份现场（见规范 §17）。抓快照本身失败也不影响主流程。"""
+    try:
+        from d2h.snapshot import errsnap
+
+        target = getattr(args, "target", "loader") if args is not None else "loader"
+        d = errsnap.capture_error(exc, list(argv or []), target)
+        if d:
+            print(f"[错误现场已存档] {d}")
+            print("  可离线对照校验，确认无误后 cli.py err --clean 删除")
+    except Exception as snape:  # noqa: BLE001
+        LOGGER.debug("抓取错误现场失败: %s", snape)
 
 
 def cmd_ui(args) -> int:
@@ -960,6 +998,8 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
      ["hover", "--watch"]),
     ("17", "定位鼠标指向指针（差异扫描 30 秒：期间把鼠标移到 NPC/物品上并停住）",
      ["hover", "--scan"]),
+    ("18", "报错现场快照：列出（报错时自动抓取，可离线对照）", ["err"]),
+    ("19", "清理报错现场快照", ["err", "--clean"]),
     ("q", "退出", None),
 ]
 
@@ -1078,6 +1118,7 @@ def cmd_menu(args) -> int:
             print("\n(已中断，返回菜单)")
         except Exception as e:  # noqa: BLE001  菜单不因单条命令失败而退出
             LOGGER.exception("执行出错: %s", e)
+            _auto_errsnap(e, argv, None)
         try:
             input("\n按回车返回菜单...")
         except EOFError:
@@ -1210,6 +1251,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tp = sub.add_parser("tmp", help="查看/清理项目内临时目录（禁写 C 盘 %TEMP%）")
     tp.add_argument("--clean", action="store_true", help="清空 temp/")
+    ep = sub.add_parser("err", help="报错现场快照：列出/查看/清理（报错时自动抓取）")
+    ep.add_argument("--show", metavar="NAME", help="查看某份错误快照的明细")
+    ep.add_argument("--clean", action="store_true", help="删除全部错误快照")
     pp = sub.add_parser("parse", help="离线解析快照摘要")
     pp.add_argument("name", help="快照名")
     return p
@@ -1253,11 +1297,14 @@ def main(argv=None) -> int:
             return cmd_list(args)
         if args.cmd == "tmp":
             return cmd_tmp(args)
+        if args.cmd == "err":
+            return cmd_err(args)
         if args.cmd == "parse":
             return cmd_parse(args)
         return 0
     except Exception as e:  # 顶层兜底，友好退出，不吐堆栈给用户
         LOGGER.exception("执行失败: %s", e)
+        _auto_errsnap(e, argv if argv is not None else sys.argv[1:], args)
         return 2
     finally:
         LOGGER.info("本次日志已存档: %s", logfile)

@@ -174,6 +174,14 @@ UI_SIDE_MEANING: dict[int, str] = {0: "无", 1: "右开", 2: "左开", 3: "左�
 UI_STASH_FLAG: dict = {"module": "D2CLIENT", "offset": 0x11BC34}
 UI_STASH_MEANING: dict[int, str] = {12: "仓库", 14: "盒子"}
 
+# ---- unit hash 表（按类型分块；配合 VARS.D2CLIENT.UnitTable 使用）----
+#   块索引 = 单位类型（0玩家/1怪物NPC/2物件/3导弹/4物品/5房间格）
+#   每块 128 个桶 × 4 字节 = 512 字节；桶索引 = unitId & 0x7F
+#   桶内链表：UnitAny.pListNext（+0xE8）
+UNIT_TABLE_STRIDE: int = 512      # 每种类型一块，512 字节
+UNIT_TABLE_BUCKETS: int = 128     # 每块 128 个桶
+UNIT_NEXT_OFFSET: int = 0xE8      # UnitAny.pListNext
+
 # ---- 1.13c 全局变量指针（VARS[dll][name] = 默认基址下的绝对地址）----
 # 来源：d2ptrs.h 中 D2VARPTR / D2VARPTR2 的「第一个参数」（即 1.13c 地址）。
 VARS: dict[str, dict[str, int]] = {
@@ -194,6 +202,14 @@ VARS: dict[str, dict[str, int]] = {
         #   即 0x11C2F4/0x11C2F8 是"缓存有效/需重算"标志，实测值为 0 或 1，**不可当指针解引用**。
         "SelectedUnitFlag": 0x6FBCC2F4,
         "SelectedUnitFlag2": 0x6FBCC2F8,
+        # ★ 悬停单位的 (unitId, 类型) —— GetSelectedUnit 就是用这两个去查 unit 表的：
+        #   mov edx,[0x6FBC964C]; shl edx,9; add edx,0x6FBBA608   ← 块索引 = 类型
+        #   mov ecx,[0x6FBC9638]; and eax,0x7F                    ← 桶索引 = unitId & 0x7F
+        #   实测：悬停怪物时 HoverUnitId=0x0B、HoverUnitType=1。
+        "HoverUnitId": 0x6FBC9638,
+        "HoverUnitType": 0x6FBC964C,
+        # unit hash 表基址（块 = 类型，见 game.find_unit_by_id）
+        "UnitTable": 0x6FBBA608,
         "MousePos": 0x6FBCB824,          # D2_POINT_REV 鼠标位置（d2ptrs.h MousePos）
         "LastMousePos": 0x6FB8BC54,      # 最后一次鼠标位置
         "RosterUnitList": 0x6FBCBC14,

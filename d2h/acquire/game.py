@@ -273,3 +273,96 @@ def _cstr(buf) -> str:
         return raw.split(b"\x00", 1)[0].decode("ascii", "ignore")
     except Exception:
         return ""
+
+
+# ---- 鼠标指向的单位 ----
+UNIT_TYPE_NAME: dict[int, str] = {
+    0: "玩家", 1: "怪物/NPC", 2: "物件", 3: "导弹", 4: "物品", 5: "房间格子",
+}
+
+
+def find_unit_by_id(handle: int, bases: dict[str, int], unit_id: int,
+                    unit_type: int, max_nodes: int = 128) -> int | None:
+    """按 (类型, unitId) 从 unit hash 表反查 UnitAny* 地址；找不到返回 None。
+
+    D2 1.13c 结构（只读反汇编 GetSelectedUnit = 0x6FB01A80 得出，不执行代码）：
+      VARS.D2CLIENT.UnitTable = 0x6FBBA608（= D2CLIENT + 0x10A608）
+      块索引 = 单位类型；每块 UNIT_TABLE_STRIDE(512) 字节 = 128 个桶
+      桶索引 = unitId & 0x7F；桶内是 pListNext(+0xE8) 串成的链表
+    对应指令：`mov edx,[0x6FBC964C]; shl edx,9; add edx,0x6FBBA608`
+              `mov ecx,[0x6FBC9638]; and eax,0x7F`
+    自检：find_unit_by_id(1, 0) 返回的正是 PlayerUnit 全局的值（角色 daaaa）。
+    """
+    cb = bases.get("D2CLIENT")
+    base = off.VARS["D2CLIENT"]["UnitTable"] - off.DLLBASE["D2CLIENT"]
+    if not cb or not unit_id or unit_type is None or unit_type > 5:
+        return None
+    blk = cb + base + unit_type * off.UNIT_TABLE_STRIDE
+    bucket = unit_id & 0x7F
+    data = proc.read_bytes(handle, blk, off.UNIT_TABLE_STRIDE)
+    if not data or len(data) < (bucket + 1) * 4:
+        return None
+    node = int.from_bytes(data[bucket * 4:bucket * 4 + 4], "little")
+    seen = 0
+    while node and seen < max_nodes:
+        t = proc.read_uint(handle, node + 0x00, 4)
+        i = proc.read_uint(handle, node + 0x0C, 4)
+        if t == unit_type and i == unit_id:
+            return node
+        node = proc.read_uint(handle, node + off.UNIT_NEXT_OFFSET, 4)
+        seen += 1
+    return None
+
+
+def read_hover_unit(handle: int, bases: dict[str, int]) -> dict:
+    """读取鼠标当前指向的单位（只读）。返回 dict，读不到的字段为 None。
+
+    观测点优先级：
+      1) CurrentViewItem(0x11BC38) —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
+      2) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 函数体真正用于查表的那组，反查 unit 表
+      3) (SelectedUnitFlag 0x11C2F4, Flag2 0x11C2F8) —— 另一组（实测悬停玩家时 id=1），同样反查
+    """
+    cb = bases.get("D2CLIENT")
+    out: dict = {"ptr": None, "source": "", "name": ""}
+    if not cb:
+        return out
+    v = off.VARS["D2CLIENT"]
+
+    def rd(key: str):
+        return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
+
+    out["sel_id"] = rd("SelectedUnitFlag")
+    out["sel_type"] = rd("SelectedUnitFlag2")
+    out["hover_id"] = rd("HoverUnitId")
+    out["hover_type"] = rd("HoverUnitType")
+    out["view_item"] = rd("CurrentViewItem")
+
+    if out["view_item"]:
+        out["ptr"] = out["view_item"]
+        out["source"] = "CurrentViewItem(+0x11BC38)"
+    else:
+        for kid, kt in (("hover_id", "hover_type"), ("sel_id", "sel_type")):
+            uid, ut = out[kid], out[kt]
+            if uid and ut is not None and ut <= 5:
+                p = find_unit_by_id(handle, bases, uid, ut)
+                if p:
+                    out["ptr"] = p
+                    out["source"] = f"{kid}=0x{uid:X} type={ut} → unit 表反查"
+                    break
+
+    p = out["ptr"]
+    if p:
+        out["unit_type"] = proc.read_uint(handle, p + 0x00, 4)
+        out["txt"] = proc.read_uint(handle, p + 0x04, 4)
+        out["unit_id"] = proc.read_uint(handle, p + 0x0C, 4)
+        out["mode"] = proc.read_uint(handle, p + 0x10, 4)
+        pp = proc.read_uint(handle, p + 0x2C, 4)
+        if pp:
+            out["x"] = proc.read_uint(handle, pp + 0x02, 2)
+            out["y"] = proc.read_uint(handle, pp + 0x06, 2)
+        if out.get("unit_type") == 0:
+            pd = proc.read_uint(handle, p + 0x14, 4)
+            if pd:
+                raw = proc.read_bytes(handle, pd, 16) or b""
+                out["name"] = raw.split(b"\x00", 1)[0].decode("ascii", "ignore")
+    return out
