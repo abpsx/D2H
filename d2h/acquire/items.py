@@ -127,19 +127,32 @@ class ItemTextTable:
 
 
 def describe_inventory(handle: int, bases: dict[str, int], player_unit: st.UnitAny) -> list[dict]:
-    """枚举某玩家单位的全部物品，并为每件附加 代码 / 显示名 / 类型名。"""
+    """枚举某玩家单位的全部物品，并解析出 代码 / 显示名 / 质量。
+
+    显示名优先级（2026-09-20 起，**内存权威**）：
+      1) 游戏内存 D2Lang 字符串表：ItemTxt.wLocaleTxtNo -> LocaleText.get_clean()
+         —— 与 hackmap `D2GetLocaleText()` 同源，含服务器端下发的内容，最准。
+      2) 本地 .vcb（仅兜底，用户已指出其不完全准确）。
+      3) 物品代码 szCode。
+    """
     from d2h.acquire import game as g
+    from d2h.acquire import lang
 
     raw = g.enumerate_inventory(handle, player_unit)
     table = ItemTextTable(handle, bases)
+    lt = lang.LocaleText(handle, bases)
     out: list[dict] = []
     for it in raw:
         rec = table.read(it["type"]) if table.ptr else None
         code = rec["code"] if rec else ""
-        name = code_to_name(code) if code else ""
+        locale = rec["locale"] if rec else None
+        name_mem = lt.get_clean(locale) if (lt.ready() and locale is not None) else ""
+        name_vcb = code_to_name(code) if code else ""
         d = dict(it)
         d["code"] = code
-        d["name"] = name or code or f"type{it['type']}"
+        d["locale"] = locale
+        d["name"] = name_mem or name_vcb or code or f"type{it['type']}"
+        d["name_src"] = "内存" if name_mem else ("vcb" if name_vcb else "代码")
         d["type_name"] = QUALITY_NAME.get(it["quality"], str(it["quality"]))
         out.append(d)
     return out
@@ -178,12 +191,12 @@ def render_markdown(items: list[dict], meta: dict) -> str:
             L.append("_（无）_")
             L.append("")
             continue
-        L.append("| # | 名称 | 代码 | 质量 | 等级 | 孔 | 位置 |")
-        L.append("| ---: | --- | --- | --- | ---: | ---: | --- |")
+        L.append("| # | 名称 | 来源 | 代码 | 质量 | 等级 | 孔 | 位置 |")
+        L.append("| ---: | --- | --- | --- | --- | ---: | ---: | --- |")
         for i, x in enumerate(group, 1):
             slot = BODY_NAME.get(x.get("body", 0), str(x.get("body", 0))) if x.get("body", 0) else LOCATION_NAME.get(x.get("location", 0), str(x.get("location", 0)))
             L.append(
-                f"| {i} | {x.get('name','')} | {x.get('code','')} | "
+                f"| {i} | {x.get('name','')} | {x.get('name_src','')} | {x.get('code','')} | "
                 f"{QUALITY_NAME.get(x.get('quality',0), x.get('quality',0))} | "
                 f"{x.get('ilvl',0)} | {x.get('socket',0) if x.get('socket') else '-'} | {slot} |"
             )

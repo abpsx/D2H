@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from datetime import datetime
@@ -790,6 +791,50 @@ def cmd_err(args) -> int:
     return 0
 
 
+def cmd_lang(args) -> int:
+    """查游戏字符串表（内存 .tbl，只读复刻 D2LANG.GetLocaleText）。"""
+    from d2h.acquire import lang
+    from d2h.acquire import offsets as off
+    from d2h.acquire import process as proc
+
+    exe, pid = proc.find_target_pid(args.target)
+    if pid is None:
+        print(f"process not found: {exe}")
+        return 1
+    try:
+        handle = proc.open_readonly(pid)
+    except OSError as e:
+        LOGGER.error("打开进程失败: %s", e)
+        return 1
+    try:
+        bases = off.collect_module_bases(handle)
+        lt = lang.LocaleText(handle, bases)
+        if not lt.ready():
+            print("D2LANG 字符串表不可读（需在游戏内，且 D2Lang.dll 已加载）")
+            return 1
+        ids: list[int] = list(args.ids or [])
+        if args.range:
+            lo, hi = args.range
+            ids.extend(range(lo, min(hi, lo + 2000) + 1))
+        if not ids:
+            print("用法: cli.py lang <id> [id...]  /  --range LO HI  /  --search 关键字")
+            return 1
+        for g in lt.groups:
+            print(f"组 {g['tag']}: count={g['count']}")
+        print()
+        for sid in ids:
+            raw = lt.get(sid)
+            if not raw:
+                continue
+            show = raw if args.raw else lang.strip_color(raw)
+            if args.search and args.search not in show:
+                continue
+            print(f"{sid:>7}  {show}")
+        return 0
+    finally:
+        proc.close(handle)
+
+
 def _auto_errsnap(exc: BaseException, argv, args=None) -> None:
     """报错时自动抓一份现场（见规范 §17）。抓快照本身失败也不影响主流程。"""
     try:
@@ -977,6 +1022,8 @@ def _dispatch(argv: list[str]) -> int:
         "ui": cmd_ui,
         "hover": cmd_hover,
         "send": cmd_send,
+        "err": cmd_err,
+        "lang": cmd_lang,
     }
     fn = table.get(args.cmd)
     return fn(args) if fn is not None else 0
@@ -1006,6 +1053,7 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
      ["hover", "--scan"]),
     ("18", "报错现场快照：列出（报错时自动抓取，可离线对照）", ["err"]),
     ("19", "清理报错现场快照", ["err", "--clean"]),
+    ("20", "查询游戏字符串表（内存 .tbl，输入 id 或区间）", None),
     ("q", "退出", None),
 ]
 
@@ -1082,6 +1130,29 @@ def _menu_sendkey() -> list[str] | None:
         print("  输入无效。")
 
 
+def _menu_lang() -> list[str] | None:
+    """字符串表查询子菜单：返回 lang 的 argv，None = 返回上级。"""
+    print()
+    print("  查询游戏字符串表（从内存 .tbl 读取，非本地文件）：")
+    print("    直接输入 id（可空格分隔多个，支持 0x 十六进制）")
+    print("    或输入区间如  10000-10050")
+    print("    x. 返回上级菜单")
+    try:
+        raw = input("  请输入 [x 返回]: ").strip()
+    except EOFError:
+        return None
+    if raw.lower() == "x" or not raw:
+        return None
+    m = re.fullmatch(r"(\w+)\s*-\s*(\w+)", raw)
+    if m:
+        try:
+            return ["lang", "--range", str(int(m.group(1), 0)), str(int(m.group(2), 0))]
+        except ValueError:
+            print("  区间格式无效。")
+            return None
+    return ["lang"] + raw.split()
+
+
 def cmd_menu(args) -> int:
     """交互式中文菜单（run.bat 无参数双击时进入；也可 `cli.py menu` 直接跑）。
 
@@ -1097,7 +1168,7 @@ def cmd_menu(args) -> int:
             print(f"  {key:>2}. {desc}")
         print("==========================================")
         try:
-            choice = input("请选择 [1-14/q]: ").strip().lower()
+            choice = input("请选择 [1-20/q]: ").strip().lower()
         except EOFError:
             print("(输入结束，退出)")
             return 0
@@ -1115,6 +1186,8 @@ def cmd_menu(args) -> int:
             argv = _menu_parse()
         elif key == "14":
             argv = _menu_sendkey()
+        elif key == "20":
+            argv = _menu_lang()
         if argv is None:
             continue
         print()
@@ -1245,6 +1318,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda s: int(s, 0), metavar=("LO", "HI"),
         help="--scan 的采样区间（相对 D2CLIENT 基址，默认 0x100000 0x130000）",
     )
+    lp = sub.add_parser("lang", help="查游戏字符串表（内存 .tbl，只读）")
+    lp.add_argument("ids", nargs="*", type=lambda s: int(s, 0),
+                    help="字符串 id（可多个，支持 0x 十六进制）")
+    lp.add_argument("--range", nargs=2, type=lambda s: int(s, 0), metavar=("LO", "HI"),
+                    help="批量列出 id 区间（上限 2000 条）")
+    lp.add_argument("--search", help="只显示包含该关键字的结果")
+    lp.add_argument("--raw", action="store_true", help="保留游戏颜色控制符（默认已清洗）")
+    lp.add_argument(
+        "--target",
+        default="loader",
+        choices=list(process_targets()),
+        help="目标类型: loader=D2loader.exe / game=game.exe",
+    )
     skp = sub.add_parser("send", help="向游戏窗口投递按键（PostMessage，不写内存；仅供开发验证）")
     skp.add_argument("key", help="按键名: i/q/c/t/esc/enter/space，或单字符、0xNN 虚拟键码")
     skp.add_argument("--times", type=int, default=1, help="投递次数（默认 1）")
@@ -1305,6 +1391,8 @@ def main(argv=None) -> int:
             return cmd_tmp(args)
         if args.cmd == "err":
             return cmd_err(args)
+        if args.cmd == "lang":
+            return cmd_lang(args)
         if args.cmd == "parse":
             return cmd_parse(args)
         return 0
