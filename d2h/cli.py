@@ -358,6 +358,59 @@ def _print_layout(lay: dict) -> None:
         print("         所以先确认在游戏中，再判读下面的词缀结果。")
 
 
+def _print_rep_affixes(rep: dict) -> None:
+    """打印 rep['affixes'] 全组 + 稀有物品显示名两解。
+
+    ★ 2026-09-20 老大要求把「词条」接进菜单 16（hover --watch），所以这段从
+      `_print_item_props` 抽出来共用 —— **同一份实现**，避免两处格式/字段漂移。
+      规范 §12：所有字段一律打，缺值打 `-`。取行公式见 `itemprops._resolve()`。
+    """
+    f = rep["fields"]
+    print("  -- 词缀 --")
+    any_affix = False
+    for a in rep["affixes"]:
+        if not a["idx"] and not a["rec"]:
+            continue
+        any_affix = True
+        print(f"    [{a['kind']} 槽{a['slot']}] id={a['idx'] or 0}  解析方式={a.get('mode') or '-'}")
+        r = a.get("rec")
+        if r:
+            print(f"        采信  : 行{a['idx'] - 1}({a.get('zone') or '-'})  0x{r['rec_addr']:08X}"
+                  f"  name={r['name'] or '-'}  internal={r['internal'] or '-'}"
+                  f"  locale={r['locale']}")
+        elif a["idx"]:
+            print(f"        采信  : -（行{a['idx'] - 1} {a.get('zone') or '-'} 读不到名字："
+                  f"越界 / 空行 / 表不可读）")
+        alt = a.get("alt_rec")
+        if alt:
+            print(f"        另一解: 行{a['idx']}({a.get('alt_zone') or '-'})  0x{alt['rec_addr']:08X}"
+                  f"  name={alt['name'] or '-'}  internal={alt['internal'] or '-'}"
+                  f"  locale={alt['locale']}")
+        else:
+            print(f"        另一解: -（行{a['idx']} {a.get('alt_zone') or '-'}）")
+    if not any_affix:
+        print("    （该物品 ItemData 里没有词缀 id：普通/超强/暗金/套装/宝石/符文都是这样）")
+    rn = rep.get("rare_name")
+    if rn and (f.get("rare_prefix") or f.get("rare_suffix")):
+        print("  -- 稀有物品显示名（前缀词+后缀词，游戏公式取行）--")
+        print(f"    (值-1) 采信 = {rn['primary']}")
+        print(f"    (值)   另一解 = {rn['alt']}")
+
+
+def _print_rep_stats(rep: dict) -> None:
+    """打印 rep['stats'] 全组（物品实际属性）。与 `_print_item_props` 共用。"""
+    print(f"  -- 属性 StatList 全组（共 {len(rep['stats'])} 条；原始值直读=显示值，"
+          f"已用悬停文本验证）--")
+    for k, s in enumerate(rep["stats"]):
+        extra = (f"  alt(÷256,未验证)={s['value_alt']}" if s.get("value_alt") is not None else "")
+        print(f"    [{k:>3}] {'EX' if s['ex'] else '  '} list{s['list']} {s['group']:<4s}"
+              f" #{s['index']:<2d} stat={s['stat_id']:<4d} param={s['param']:<5d}"
+              f" raw={s['value']:<10d} show={s['value_show']:<8}{extra}"
+              f" desc={s['desc'] or '-'}"
+              f" func={s['desc_func']} val={s['desc_val']} text={s['text'] or '-'}"
+              f"  [ItemStatCost 原样: div={s['isc_div']} mul={s['isc_mul']}]")
+
+
 def _print_item_props(rep: dict, title: str, props, hover_text: str = "",
                       depth: int = 0) -> None:
     """完整打印一件物品的词缀 + 属性（规范 §12：所有字段一律打，缺失打 `-`）。
@@ -394,46 +447,8 @@ def _print_item_props(rep: dict, title: str, props, hover_text: str = "",
         print(f"    ★ 符文之语：wMagicPrefix[0]={rw['locale']} 是**名字 locale id**（不是词缀索引）"
               f" → {rw['name'] or '-'}")
 
-    print("  -- 词缀 --")
-    any_affix = False
-    for a in rep["affixes"]:
-        if not a["idx"] and not a["rec"]:
-            continue
-        any_affix = True
-        print(f"    [{a['kind']} 槽{a['slot']}] id={a['idx'] or 0}  解析方式={a.get('mode') or '-'}")
-        r = a.get("rec")
-        if r:
-            print(f"        采信  : 行{a['idx'] - 1}({a.get('zone') or '-'})  0x{r['rec_addr']:08X}"
-                  f"  name={r['name'] or '-'}  internal={r['internal'] or '-'}"
-                  f"  locale={r['locale']}")
-        elif a["idx"]:
-            print(f"        采信  : -（行{a['idx'] - 1} {a.get('zone') or '-'} 读不到名字："
-                  f"越界 / 空行 / 表不可读）")
-        alt = a.get("alt_rec")
-        if alt:
-            print(f"        另一解: 行{a['idx']}({a.get('alt_zone') or '-'})  0x{alt['rec_addr']:08X}"
-                  f"  name={alt['name'] or '-'}  internal={alt['internal'] or '-'}"
-                  f"  locale={alt['locale']}")
-        else:
-            print(f"        另一解: -（行{a['idx']} {a.get('alt_zone') or '-'}）")
-    if not any_affix:
-        print("    （该物品 ItemData 里没有词缀 id：普通/超强/暗金/套装/宝石/符文都是这样）")
-    rn = rep.get("rare_name")
-    if rn and (f.get("rare_prefix") or f.get("rare_suffix")):
-        print(f"  -- 稀有物品显示名（前缀词+后缀词，游戏公式取行）--")
-        print(f"    (值-1) 采信 = {rn['primary']}")
-        print(f"    (值)   另一解 = {rn['alt']}")
-
-    print(f"  -- 属性 StatList 全组（共 {len(rep['stats'])} 条；原始值直读=显示值，"
-          f"已用悬停文本验证）--")
-    for k, s in enumerate(rep["stats"]):
-        extra = (f"  alt(÷256,未验证)={s['value_alt']}" if s.get("value_alt") is not None else "")
-        print(f"    [{k:>3}] {'EX' if s['ex'] else '  '} list{s['list']} {s['group']:<4s}"
-              f" #{s['index']:<2d} stat={s['stat_id']:<4d} param={s['param']:<5d}"
-              f" raw={s['value']:<10d} show={s['value_show']:<8}{extra}"
-              f" desc={s['desc'] or '-'}"
-              f" func={s['desc_func']} val={s['desc_val']} text={s['text'] or '-'}"
-              f"  [ItemStatCost 原样: div={s['isc_div']} mul={s['isc_mul']}]")
+    _print_rep_affixes(rep)
+    _print_rep_stats(rep)
     print(f"  -- 孔内物品（{len(rep['sockets'])} 个）--")
     if not rep["sockets"]:
         print("    -（该物品未打孔，或孔内为空；未打孔时 pOwnerInventory 指向玩家背包，"
@@ -954,6 +969,57 @@ def _print_item_display_name(handle, p: int, namer) -> None:
         print(f"  注              = {n}")
 
 
+def _print_item_hover_details(handle, p: int, namer) -> None:
+    """悬停到物品（type=4）时一次给全：完整显示名 + 词条 + 属性（只读）。
+
+    ★ 2026-09-20 老大要求（菜单 16）：指着物品时除了完整名，还要**词条与属性**。
+      词条/属性段**复用 `props` 报告的实现**（`_print_rep_affixes` / `_print_rep_stats`），
+      两处永远同源同字段、不会各自漂移。
+    规范 §12：字段一律打印、缺值打 `-`；任何一步失败都降级成打印原因，
+    **绝不抛异常打断 watch 监听**（每帧都会走到这里）。
+    """
+    props = getattr(namer, "props", None)
+    if props is None:
+        print("  ---- 完整名 / 词条 / 属性（本帧跳过：词缀解析器不可用）----")
+        return
+    _print_item_display_name(handle, p, namer)
+    try:
+        from d2h.acquire import itemprops as ipx
+
+        rep = ipx.item_affix_report(handle, props.bases, p)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ---- 词条 / 属性（解析异常，已忽略：{e!r}）----")
+        return
+    if not rep.get("ok"):
+        print(f"  ---- 词条 / 属性（不可用：{rep.get('reason') or '-'}）----")
+        return
+    lay = rep.get("layout") or {}
+    if not lay.get("tables_readable", True):
+        print("  [WARN] 词缀表当前不可读（读到全 0）—— 实测**离开游戏后该块会被清零**，"
+              "下面的词条行不可采信。")
+    _print_rep_affixes(rep)
+    _print_rep_stats(rep)
+    sock = rep.get("sockets") or []
+    print(f"  -- 孔内物品（{len(sock)} 个；逐条完整属性用 props --index N）--")
+    if not sock:
+        print("    -")
+    for sp in sock:
+        head = _read_unit_head(handle, sp)
+        txt = head.get("dwTxtFileNo") if head else None
+        nm, _src = ("", "")
+        try:
+            if head:
+                nm, _src = namer.name(sp, head.get("dwUnitType"), txt)
+        except Exception:  # noqa: BLE001
+            nm = ""
+        nstat = "-"
+        try:
+            nstat = str(len(ipx.item_affix_report(handle, props.bases, sp).get("stats") or []))
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"    ptr=0x{sp:08X}  txt={_num(txt)}  名={nm or '-'}  属性条数={nstat}")
+
+
 def _dump_hover(handle, p: int, namer=None) -> None:
     """打印 SelectedUnit 指向的单位信息（namer 提供名称解析）。"""
     from d2h.acquire import game as gm
@@ -988,8 +1054,9 @@ def _dump_hover(handle, p: int, namer=None) -> None:
         name = raw.split(b"\x00", 1)[0].decode("ascii", "replace")
         print(f"  玩家名={name}")
     if t == 4 and namer is not None:
-        # ★ 2026-09-20 老大要求：鼠标指向物品时直接给出**完整名**（接进菜单 16 hover --watch）
-        _print_item_display_name(handle, p, namer)
+        # ★ 2026-09-20 老大要求：鼠标指向物品时给出**完整名 + 词条 + 属性**
+        #   （接进菜单 16 hover --watch；与 props 报告共用同一份打印实现）
+        _print_item_hover_details(handle, p, namer)
 
 
 def _print_hover_frame(handle, u: dict, namer) -> None:
@@ -1234,6 +1301,8 @@ def cmd_hover(args) -> int:
                   "（典型：从一个物品滑到另一个，标记恒 1 不跳，只有 CurrentViewItem/hover_id 变））")
         print("（输出 = 每次采样的完整结构：D2WIN 开关/框坐标/悬停文本 + D2CLIENT 四个原始值 + 判定；"
               "空值一律打 '-'，不做任何裁剪）")
+        print("（★ 指向物品(type=4)时另给三段：完整显示名 + 词条全组(行号/区段/另一解) + "
+              "属性 StatList 全组(stat/param/raw/show/desc) + 孔内物品；与 props 报告同源同字段）")
         print(f"（采样间隔 {interval}s；任一字段变动即取一次完整结构并打印）")
         print("（2026-09-20 取消 UI 阻断：开着背包/仓库悬停 NPC、地面物品照样解析，"
               "面板名只作提示打印）")
@@ -1566,9 +1635,9 @@ MENU_ITEMS: list[tuple[str, str, list[str] | None]] = [
     ("12", "游戏内 UI 面板监听（0.3 秒轮询，面板开关变化才输出）", ["watch", "--ui"]),
     ("13", "查看游戏内 UI 面板（一次性读数）", ["ui"]),
     ("14", "向游戏投递按键（i/q/c/t/esc，仅窗口消息不写内存）", None),
-    ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数；指向物品时给出**完整显示名**）",
+    ("15", "查看鼠标指向的对象（NPC/怪物/物品，一次性读数；指向物品时给出**完整名 + 词条 + 属性**）",
      ["hover"]),
-    ("16", "鼠标指向对象监听（0.15 秒轮询，无去抖；指向物品时实时给出**完整显示名**，Ctrl+C 结束）",
+    ("16", "鼠标指向对象监听（0.15 秒轮询，无去抖；指向物品时实时给出**完整名 + 词条 + 属性**，Ctrl+C 结束）",
      ["hover", "--watch"]),
     ("17", "定位鼠标指向指针（差异扫描 30 秒：期间把鼠标移到 NPC/物品上并停住）",
      ["hover", "--scan"]),
