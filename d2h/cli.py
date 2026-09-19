@@ -701,6 +701,9 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
     print(f"  D2CLIENT+0x11C2F8 SelFlag2        = {_num(u.get('sel2_ptr'))}"
           "    (已判定：标记位，不是指针)")
     print(f"  D2CLIENT+0x11BC38 CurrentViewItem = {_num(u.get('view_item'), True, 8)}")
+    ui = u.get("ui") or []
+    print(f"  当前打开面板     = {'/'.join(ui) if ui else '-'}"
+          "    (仅提示，2026-09-20 起不再阻断解析)")
     # ---- 判定结果 ----
     print("  ---- 判定 ----")
     print(f"  来源             = {u.get('source') or '-'}")
@@ -710,6 +713,19 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
         if txt:
             print("  => 无单位指针但悬停文本非空：以文本为准"
                   "（地面物品名文本框 / UI 内短名等场景）")
+        stale = u.get("stale")
+        if stale and stale.get("ptr"):
+            nm = ""
+            try:
+                nm, _src = namer.name(stale["ptr"], stale.get("unit_type"),
+                                      stale.get("txt"))
+            except Exception:  # noqa: BLE001
+                nm = ""
+            print(f"  [旧值对照] 若不做门控会解析成 UnitAny=0x{stale['ptr']:08X} "
+                  f"类型={_num(stale.get('unit_type'))} txt={_num(stale.get('txt'))} "
+                  f"名称={nm or '-'}")
+            print("             ^ HoverFlag=0 时这是**陈旧值**（鼠标已不在对象上），"
+                  "判定不采信，仅供对照")
         return
     print(f"  UnitAny          = 0x{p:08X}")
     _dump_hover(handle, p, namer)
@@ -856,8 +872,12 @@ def cmd_hover(args) -> int:
                   "地面/空处不再误报；加 --no-gate 关闭）")
         print("（输出 = 每次采样的完整结构：D2WIN 开关/框坐标/悬停文本 + D2CLIENT 四个原始值 + 判定；"
               "空值一律打 '-'，不做任何裁剪）")
-        print(f"（不再去抖：HoverFlag=1 当帧即取指针，换对象立刻更新；采样间隔 {interval}s；"
-              "--raw = 每帧都打，不加则只在任一字段变化时打）")
+        print("（不再去抖：HoverFlag=1 当帧即取指针，换对象立刻更新；采样间隔 "
+              f"{interval}s）")
+        print("（2026-09-20 取消 UI 阻断：开着背包/仓库悬停 NPC、地面物品照样解析，"
+              "面板名只作提示打印）")
+        print("（按你的要求：**标记一变就取一次指针** —— flag 升降沿必然触发一次完整读数；"
+              "`--raw` = 每帧都打，不加则只在任一字段变化时打）")
         last_key = None
         first = True       # 首次采样必打印（单次读数也总有输出）
         rc = 0
@@ -869,6 +889,9 @@ def cmd_hover(args) -> int:
             key = (u.get("flag"), u.get("ptr"), u.get("hover_id"),
                    u.get("hover_type"), u.get("view_item"), u.get("text"))
             if first or key != last_key or getattr(args, "raw", False):
+                # flag=0 时额外读一次"不门控"的结果作对照（判定仍不采信，只用于诊断）
+                if gate and not u.get("flag"):
+                    u["stale"] = gm.read_hover_unit(handle, bases, gate=False)
                 _print_hover_frame(handle, u, namer)
                 last_key = key
                 first = False

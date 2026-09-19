@@ -479,13 +479,18 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
       默认用它做门控（gate=True）：flag=0 时直接判「无悬停对象」，不解析 ptr。
       ⇒ 解决了两个历史现象：移开瞬间闪出地面 tile、UI 打开时残留上一个世界对象。
 
-    单位来源优先级（flag=1 时）：
+    单位来源优先级（flag=1 时），每一级都过 `_try_ptr()` 校验，失败自动退到下一条：
       1) CurrentViewItem(0x11BC38)  —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
       2) SelectedUnitFlag(0x11C2F4) / Flag2(0x11C2F8) —— ⚠️ **实测是标记不是指针**，
-         这里只是留一道 `_try_ptr()` 校验（真成指针时自动用上，否则跳过）
+         这里只是留一道校验（真成指针时自动用上，否则跳过）
       3) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 兜底：反查 unit 表
-     4) D2WIN+0xC9E58 悬停文本 —— 拿不到单位时（地面物品名文本框）仍能报出游戏显示的字
-    指针会做合法性校验（类型 0..5、unitId 非 0），校验失败自动退到下一条。
+      4) D2WIN+0xC9E58 悬停文本 —— 拿不到单位时（地面物品名文本框）仍能报出游戏显示的字
+
+    ★★ UI 阻断**已取消**（2026-09-20）：原先命中 `UI_BLOCKS_HOVER`（背包/仓库/商店…）
+    就直接 return、不去解析单位 —— 结果**开着背包时悬停 NPC / 地面物品全部显示为空**
+    （用户实机反馈）。现在面板名只作为提示放进 `out["ui"]`，**绝不阻断解析**。
+    ⚠️ 教训：那条"防残留"规则是为了解决「仓库界面一直显示储藏箱」，但它把**正常的世界
+    悬停**一起误杀了；宁可偶发陈旧值（有 flag 把关），也不要把真实指向屏蔽掉。
     """
     cb = bases.get("D2CLIENT")
     out: dict = {"ptr": None, "source": "", "name": "", "flag": None,
@@ -544,13 +549,6 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
     if not _try_ptr(out["view_item"], "CurrentViewItem(+0x11BC38)"):
         if not _try_ptr(out["sel_ptr"], "SelectedUnitFlag(+0x11C2F4)"):
             if not _try_ptr(out["sel2_ptr"], "SelectedUnitFlag2(+0x11C2F8)"):
-                # UI 打开时鼠标不在世界画面，(unitId, 类型) 停在最后交互的世界对象上
-                # （典型：点储藏箱进仓库后一直显示"储藏箱"）。此时绝不回退反查。
-                blocked = hover_blocked_by_ui(handle, bases)
-                if blocked:
-                    out["source"] = (f"UI 打开中({'/'.join(blocked)})："
-                                     f"鼠标在界面上，无指向物品")
-                    return out
                 uid, ut = out["hover_id"], out["hover_type"]
                 if uid and ut is not None and ut <= 5:
                     p = find_unit_by_id(handle, bases, uid, ut)
@@ -558,6 +556,8 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> di
                         out["ptr"] = p
                         out["source"] = (f"hover_id=0x{uid:X} type={ut} "
                                          f"-> unit 表反查")
+    # 打开的面板只作为**提示**带出去，不再阻断解析（见 docstring 的 UI 阻断说明）
+    out["ui"] = hover_blocked_by_ui(handle, bases)
 
     p = out["ptr"]
     if p:
