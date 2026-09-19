@@ -683,6 +683,18 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
     """
     stamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{stamp}] ==== 悬停对象完整结构 ====")
+    # ---- 沿触发：本次是因哪个标记跳变而取样的 ----
+    trg = u.get("trigger")
+    if trg and trg != "基线":
+        prev, cur = u.get("edge") or (None, None)
+        print(f"  触发标记         = {trg}（{gm.HOVER_TRIGGER_DESC.get(trg, '-')}）"
+              f"  {_num(prev)} -> {_num(cur)}")
+    elif trg:
+        print("  触发标记         = 基线（首帧，全链取一次）")
+    mk = u.get("marks") or {}
+    print(f"  标记 ground(0x11C2F8)={_num(mk.get('ground'))}   "
+          f"unit(0xCA664)={_num(mk.get('unit'))}   "
+          f"npc(0x11C2F4)={_num(mk.get('npc'))}")
     # ---- D2WIN 侧：与单位指针无关的原始观测量 ----
     print(f"  D2WIN+0xCA664    HoverFlag        = {_num(u.get('flag'))}"
           "    (⚠️ 实测地面物品悬停时也可为 0，不作判据，仅供对照)")
@@ -709,6 +721,9 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
     #   每行都必须带依据（如 HoverFlag=0），便于用户实机对照校验后反馈。
     print("  ---- 判定（程序推断，依据见各行括号内）----")
     print(f"  来源             = {u.get('source') or '-'}")
+    if u.get("left"):
+        print("  => 该路径标记回落（非 0 -> 0）：判为**已移开**，"
+              "下方单位值是这一帧读到的原始值，仅供参考")
     p = u.get("ptr")
     if not p:
         print("  UnitAny          = -    （本次没取到单位指针）")
@@ -869,11 +884,17 @@ def cmd_hover(args) -> int:
         # 命名器：字符串表只构造一次，供整个监听循环复用
         namer = _names.UnitNamer(handle, bases)
         gate = getattr(args, "gate", False)
+        trigger = not getattr(args, "no_trigger", False)
         print("（★ 2026-09-20 起**默认不做门控**：实测鼠标悬停地面物品时 "
               "D2WIN+0xCA664 HoverFlag = 0，而 HoverUnitId/Type 反查出的单位是对的 "
               "—— 门控会把真值屏蔽成空，故该位现在只作读数打印；加 --gate 恢复旧行为）")
         if gate:
             print("（当前 --gate 已开：flag=0 即判「无悬停对象」，不解析单位）")
+        if trigger:
+            print("（★ 沿触发：**两个标记一起判，谁跳变就从谁那条路取一次**"
+                  " —— `ground`=D2CLIENT+0x11C2F8 地面物品；`unit`=D2WIN+0xCA664 "
+                  "NPC/物件/UI 内物品。都没跳变就不刷新 ⇒ 移开后不会残留上一个对象；"
+                  "标记回落（1->0）判为已移开。`--no-trigger` 退回每帧都取）")
         print("（输出 = 每次采样的完整结构：D2WIN 开关/框坐标/悬停文本 + D2CLIENT 四个原始值 + 判定；"
               "空值一律打 '-'，不做任何裁剪）")
         print(f"（采样间隔 {interval}s；任一字段变动即取一次完整结构并打印）")
@@ -883,22 +904,38 @@ def cmd_hover(args) -> int:
               "`--raw` = 每帧都打，不加则只在任一字段变化时打）")
         print("（★ 规范 §3.7：本命令**只呈现读数**，不对游戏状态做主观推断；"
               "判定段每行都标了依据，请以实机校验为准，有出入直接反馈）")
-        last_key = None
-        first = True       # 首次采样必打印（单次读数也总有输出）
+        last_marks: dict[str, int | None] = {}
+        first = True       # 首帧必打（单次读数也总有输出）
         rc = 0
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
         deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
-            u = gm.read_hover_unit(handle, bases, gate=gate)
-            # ★ 任一字段变化即算新状态（含悬停文本 —— flag=0 但有文本也照打）
-            key = (u.get("flag"), u.get("ptr"), u.get("hover_id"),
-                   u.get("hover_type"), u.get("view_item"), u.get("text"))
-            if first or key != last_key or getattr(args, "raw", False):
-                # flag=0 时额外读一次"不门控"的结果作对照（判定仍不采信，只用于诊断）
-                if gate and not u.get("flag"):
-                    u["stale"] = gm.read_hover_unit(handle, bases, gate=False)
-                _print_hover_frame(handle, u, namer)
-                last_key = key
+            marks = gm.read_hover_marks(handle, bases)
+            if first:
+                # 首帧：全链取一次作基线（两条路都覆盖）
+                frames: list[str | None] = [None]
+            elif not trigger:
+                # --no-trigger：退回旧行为，两条路每帧都取
+                frames = ["unit", "ground"]
+            else:
+                # 沿触发：哪个标记跳变就从哪条路取；一个都没变 => 鼠标没换对象，不刷新
+                # （`npc`=0x11C2F4 只作观测打印，不单独触发取样）
+                frames = [k for k, v in marks.items()
+                          if k != "npc" and v is not None and last_marks.get(k) != v]
+            if frames or getattr(args, "raw", False):
+                if not frames:
+                    print(f"[{datetime.now():%H:%M:%S}] 无标记跳变（未触发取样）")
+                for k in frames:
+                    u = gm.read_hover_unit(handle, bases, gate=gate, trigger=k)
+                    u["marks"] = marks
+                    u["trigger"] = k or "基线"
+                    prev, cur = last_marks.get(k), marks.get(k)
+                    u["edge"] = (prev, cur)
+                    # 下降沿（非 0 -> 0）= 该路径的标记回落，鼠标离开了它管的对象
+                    if k and prev not in (None, 0) and not cur:
+                        u["left"] = True
+                    _print_hover_frame(handle, u, namer)
+                last_marks = marks
                 first = False
             if not watch:
                 break
@@ -1451,6 +1488,11 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument(
         "--raw", action="store_true",
         help="--watch 每帧都打印（不看变化），用于肉眼核对 Sel/Sel2/ViewItem 原始值",
+    )
+    hp.add_argument(
+        "--no-trigger", action="store_true",
+        help="关闭「沿触发」（默认开：两个标记谁跳变就从谁那条路取一次单位；"
+             "都沒跳变则不刷新，避免移开后残留上一个对象）",
     )
     hp.add_argument(
         "--gate", action="store_true",

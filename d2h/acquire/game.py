@@ -471,16 +471,60 @@ def read_hover_text(handle: int, bases: dict[str, int], limit: int = 256) -> str
     return lang.strip_color(s).strip() if s else ""
 
 
-def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = False) -> dict:
+# ★★ 悬停「沿触发」表（2026-09-20 老大方案：两个标记一起判，谁跳变就从谁那条路取）
+#   老大的判读：`D2WIN+0xCA664` 管 **NPC / 物件 / 背包内物品**；
+#               `D2CLIENT+0x11C2F8` **只对地面物品（含地面物品名文本框）响应**。
+#   两者互补 —— 地面物品那档 HoverFlag 不抬（实测=0），正由 0x11C2F8 补上；
+#   反过来移开时两者都回落，不会再拿陈旧值当"当前对象"。
+HOVER_TRIGGER_KEYS: dict[str, tuple[str, str]] = {
+    "ground": ("D2CLIENT", "SelectedUnitFlag2"),   # 0x11C2F8 地面物品 / 地面物品名文本框
+    "unit": ("D2WIN", "HoverFlag"),                # 0xCA664  NPC / 物件 / UI 内物品
+    "npc": ("D2CLIENT", "SelectedUnitFlag"),       # 0x11C2F4 对 NPC 也有响应（仅观测）
+}
+
+# 触发键 -> 中文说明（CLI 打印用）
+HOVER_TRIGGER_DESC: dict[str, str] = {
+    "ground": "地面物品 / 地面物品名文本框",
+    "unit": "NPC / 物件 / UI 内物品",
+    "npc": "NPC（观测，不单独取）",
+}
+
+
+def read_hover_marks(handle: int, bases: dict[str, int]) -> dict[str, int | None]:
+    """只读一遍全部悬停触发标记（**不解析单位**），供「沿触发」比对。
+
+    返回 `{"ground": v, "unit": v, "npc": v}`。哪个标记的值变了，就从它对应的
+    路径取一次单位；**都不变 ⇒ 鼠标没换对象 ⇒ 不刷新**（这正是「移开后一直显示
+    上一个对象」的解法 —— 旧实现每帧都取，陈旧值就被当成当前对象了）。
+    """
+    marks: dict[str, int | None] = {}
+    for key, (mod, name) in HOVER_TRIGGER_KEYS.items():
+        base = bases.get(mod)
+        if not base:
+            marks[key] = None
+            continue
+        try:
+            addr = base + (off.VARS[mod][name] - off.DLLBASE[mod])
+            marks[key] = proc.read_uint(handle, addr, 4)
+        except Exception:  # noqa: BLE001
+            marks[key] = None
+    return marks
+
+
+def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = False,
+                    trigger: str | None = None) -> dict:
     """读取鼠标当前指向的单位（只读）。返回 dict，读不到的字段为 None。
 
-    悬停开关：`D2WIN+0xCA664` HoverFlag —— **只作为读数带出，默认不做门控**
-    （2026-09-20 用户实机拍板）：
-      ⚠️ **实测反例：鼠标悬停在地面物品上时该位 = 0**，但 `HoverUnitId/Type`
-      反查出来的单位**是正确的**。⇒ 它不是「当前是否有悬停对象」的可靠判据，
-      拿它当门控会把真值屏蔽成空 —— 历史 bug 正是这样：地面物品悬停时
-      「悬停结构全空，反倒是不门控的旧值是对的」。
-      `gate=True` 仅保留作旧行为对照（调试用，默认 False）。
+    ★★ 触发方式（`trigger`，2026-09-20 老大定的方案 —— **两个标记一起判**）：
+      · `trigger="ground"` → 走**地面物品**路径：直取 hover_id 反查（跳过 CurrentViewItem，
+        免得把背包里的物品当成地面对象）
+      · `trigger="unit"`   → 走 **NPC / 物件 / UI 内物品**路径：CurrentViewItem 优先，
+        再 hover_id 反查
+      · `trigger=None`     → 全链依次尝试（旧行为，供 `--no-trigger` 对照）
+      由谁触发由调用方比对 `read_hover_marks()` 的跳变决定，本函数只管"从哪条路取"。
+
+    ⚠️ `gate` 参数（HoverFlag 门控）**默认关闭**：实测悬停地面物品时 HoverFlag=0 而真值是对的，
+    门控会把真值屏蔽成空。现在"移开后不残留"改由**沿触发**保证（标记回落即视为移开）。
 
     单位来源优先级（flag=1 时），每一级都过 `_try_ptr()` 校验，失败自动退到下一条：
       1) CurrentViewItem(0x11BC38)  —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
@@ -544,17 +588,24 @@ def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = False) -> d
                          "—— ⚠️ 地面物品悬停时该位也可能是 0，此结论不可靠")
         return out
 
-    # 1) UI 内/地上的物品  2)+3) 两个"选中标记"（实测是标记，校验基本会跳过）
-    if not _try_ptr(out["view_item"], "CurrentViewItem(+0x11BC38)"):
-        if not _try_ptr(out["sel_ptr"], "SelectedUnitFlag(+0x11C2F4)"):
-            if not _try_ptr(out["sel2_ptr"], "SelectedUnitFlag2(+0x11C2F8)"):
-                uid, ut = out["hover_id"], out["hover_type"]
-                if uid and ut is not None and ut <= 5:
-                    p = find_unit_by_id(handle, bases, uid, ut)
-                    if p:
-                        out["ptr"] = p
-                        out["source"] = (f"hover_id=0x{uid:X} type={ut} "
-                                         f"-> unit 表反查")
+    # 按触发源选解析路径（老大方案，见 HOVER_TRIGGER_KEYS 注释）：
+    #   ground -> 跳过 CurrentViewItem，直走 hover_id 反查（地面物品是 type=4 的 unit）
+    #   unit   -> CurrentViewItem 优先，再 hover_id 反查
+    #   None   -> 全链（--no-trigger 对照用）
+    if trigger != "ground":
+        _try_ptr(out["view_item"], "CurrentViewItem(+0x11BC38)")
+    if not out["ptr"]:
+        _try_ptr(out["sel_ptr"], "SelectedUnitFlag(+0x11C2F4)")
+    if not out["ptr"]:
+        _try_ptr(out["sel2_ptr"], "SelectedUnitFlag2(+0x11C2F8)")
+    if not out["ptr"]:
+        uid, ut = out["hover_id"], out["hover_type"]
+        if uid and ut is not None and ut <= 5:
+            p = find_unit_by_id(handle, bases, uid, ut)
+            if p:
+                out["ptr"] = p
+                out["source"] = (f"hover_id=0x{uid:X} type={ut} "
+                                 f"-> unit 表反查")
     # 打开的面板只作为**提示**带出去，不再阻断解析（见 docstring 的 UI 阻断说明）
     out["ui"] = hover_blocked_by_ui(handle, bases)
 
