@@ -690,7 +690,16 @@ def _print_hover_frame(handle, u: dict, namer) -> None:
     print(f"[{stamp}] ==== 悬停对象完整结构 ====")
     # ---- 沿触发：本次是因哪个标记跳变而取样的 ----
     trg = u.get("trigger")
-    if trg and trg != "基线":
+    if trg == "ptr":
+        old, new = u.get("ptr_change") or ({}, {})
+        print(f"  触发来源         = ptr（{gm.HOVER_TRIGGER_DESC.get('ptr', '-')}）")
+        print(f"    view_item {_num(old.get('view_item'), True, 8)}"
+              f" -> {_num(new.get('view_item'), True, 8)}   "
+              f"hover_id {_num(old.get('hover_id'), True)}"
+              f" -> {_num(new.get('hover_id'), True)}   "
+              f"type {_num(old.get('hover_type'))}"
+              f" -> {_num(new.get('hover_type'))}")
+    elif trg and trg != "基线":
         prev, cur = u.get("edge") or (None, None)
         print(f"  触发标记         = {trg}（{gm.HOVER_TRIGGER_DESC.get(trg, '-')}）"
               f"  {_num(prev)} -> {_num(cur)}")
@@ -900,6 +909,8 @@ def cmd_hover(args) -> int:
                   " —— `ground`=D2CLIENT+0x11C2F8 地面物品；`unit`=D2WIN+0xCA664 "
                   "NPC/物件/UI 内物品。都没跳变就不刷新 ⇒ 移开后不会残留上一个对象；"
                   "标记回落（1->0）判为已移开。`--no-trigger` 退回每帧都取）")
+            print("（★ 第三路 `ptr`：两个标记**都没跳**但指针/单位标识变了也算真实变动 "
+                  "（典型：从一个物品滑到另一个，标记恒 1 不跳，只有 CurrentViewItem/hover_id 变））")
         print("（输出 = 每次采样的完整结构：D2WIN 开关/框坐标/悬停文本 + D2CLIENT 四个原始值 + 判定；"
               "空值一律打 '-'，不做任何裁剪）")
         print(f"（采样间隔 {interval}s；任一字段变动即取一次完整结构并打印）")
@@ -910,12 +921,16 @@ def cmd_hover(args) -> int:
         print("（★ 规范 §3.7：本命令**只呈现读数**，不对游戏状态做主观推断；"
               "判定段每行都标了依据，请以实机校验为准，有出入直接反馈）")
         last_marks: dict[str, int | None] = {}
+        last_ptrs: dict[str, int | None] = {}
         first = True       # 首帧必打（单次读数也总有输出）
         rc = 0
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
         deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
             marks = gm.read_hover_marks(handle, bases)
+            ptrs = gm.read_hover_ptrs(handle, bases)
+            # 第三路触发：标记没跳，但指针/单位标识变了 => 也是真实变动
+            ptr_changed = (not first) and last_ptrs is not None and ptrs != last_ptrs
             if first:
                 # 首帧：全链取一次作基线（两条路都覆盖）
                 frames: list[str | None] = [None]
@@ -927,21 +942,29 @@ def cmd_hover(args) -> int:
                 # （`npc`=0x11C2F4 只作观测打印，不单独触发取样）
                 frames = [k for k, v in marks.items()
                           if k != "npc" and v is not None and last_marks.get(k) != v]
+                if not frames and ptr_changed:
+                    frames = ["ptr"]
             if frames or getattr(args, "raw", False):
                 if not frames:
                     print(f"[{datetime.now():%H:%M:%S}] 无标记跳变（未触发取样）")
                 for k in frames:
-                    u = gm.read_hover_unit(handle, bases, gate=gate, trigger=k)
+                    # ptr / 基线 走全链；ground、unit 走各自路径
+                    tk = None if k in (None, "ptr") else k
+                    u = gm.read_hover_unit(handle, bases, gate=gate, trigger=tk)
                     u["marks"] = marks
                     u["trigger"] = k or "基线"
                     prev, cur = last_marks.get(k), marks.get(k)
                     u["edge"] = (prev, cur)
+                    if k == "ptr":
+                        u["ptr_change"] = (last_ptrs, ptrs)
                     # 下降沿（非 0 -> 0）= 该路径的标记回落，鼠标离开了它管的对象
-                    if k and prev not in (None, 0) and not cur:
+                    if k and k != "ptr" and prev not in (None, 0) and not cur:
                         u["left"] = True
                     _print_hover_frame(handle, u, namer)
-                last_marks = marks
-                first = False
+            # 每帧都要推进基线（否则没打印的帧会让下一帧误判"又变了"）
+            last_marks = marks
+            last_ptrs = ptrs
+            first = False
             if not watch:
                 break
             # 限时监听：--seconds > 0 时到点自动结束（便于非交互抓取，如脚本里跑 20 秒）

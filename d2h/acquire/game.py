@@ -487,7 +487,32 @@ HOVER_TRIGGER_DESC: dict[str, str] = {
     "ground": "地面物品 / 地面物品名文本框",
     "unit": "NPC / 物件 / UI 内物品",
     "npc": "NPC（观测，不单独取）",
+    "ptr": "指针/单位标识变动（两个标记**未跳变**）",
 }
+
+
+def read_hover_ptrs(handle: int, bases: dict[str, int]) -> dict[str, int | None]:
+    """只读一遍「指向单位」相关的原始值（**不反查 unit 表**，很轻），用于变动监听。
+
+    ★ 老大 2026-09-20 补的规则：两个触发标记**都没跳变**时，若这里的指针/单位标识
+    变了，也算**真实变动** —— 典型场景：鼠标从一个物品滑到另一个，标记一直是 1 不跳，
+    只有 CurrentViewItem / hover_id 在变。没有这一路就会漏掉整个"同类型内换对象"的操作。
+    """
+    cb = bases.get("D2CLIENT")
+    out: dict[str, int | None] = {"view_item": None, "hover_id": None,
+                                  "hover_type": None}
+    if not cb:
+        return out
+    v = off.VARS["D2CLIENT"]
+    for key, name in (("view_item", "CurrentViewItem"),
+                      ("hover_id", "HoverUnitId"),
+                      ("hover_type", "HoverUnitType")):
+        try:
+            out[key] = proc.read_uint(handle,
+                                      cb + (v[name] - off.DLLBASE["D2CLIENT"]), 4)
+        except Exception:  # noqa: BLE001
+            out[key] = None
+    return out
 
 
 def read_hover_marks(handle: int, bases: dict[str, int]) -> dict[str, int | None]:
