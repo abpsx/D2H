@@ -573,8 +573,8 @@ def _num(v, hexa: bool = False) -> str:
     return f"0x{v:X}" if hexa else str(v)
 
 
-def _dump_hover(handle, p: int) -> None:
-    """打印 SelectedUnit 指向的单位信息。"""
+def _dump_hover(handle, p: int, namer=None) -> None:
+    """打印 SelectedUnit 指向的单位信息（namer 提供名称解析）。"""
     from d2h.acquire import game as gm
     from d2h.acquire import process as proc
 
@@ -587,6 +587,12 @@ def _dump_hover(handle, p: int) -> None:
     tname = UNIT_TYPE_NAME.get(t, f"未知({t})")
     print(f"  类型={t} {tname}  txtFileNo={_num(u['dwTxtFileNo'])}  "
           f"unitId={_num(u['dwUnitId'], True)}  mode={_num(u['dwMode'])}")
+    if namer is not None:
+        nm, src = namer.name(p, t, u["dwTxtFileNo"])
+        if nm:
+            print(f"  名称={nm}    [{src}]")
+        else:
+            print("  名称=<未能解析>（该类型命名链路未覆盖或表不可读）")
     pp = u["pPath"]
     if pp:
         x, y = gm.read_unit_pos(handle, pp, t)
@@ -708,6 +714,7 @@ def _scan_hover_unit(handle, cb: int, seconds: float, interval: float,
 def cmd_hover(args) -> int:
     """读取鼠标当前指向的单位（UnitAny），只读。--watch 可持续监听。"""
     from d2h.acquire import game as gm
+    from d2h.acquire import names as _names
     from d2h.acquire import offsets as off
     from d2h.acquire import process as proc
 
@@ -732,6 +739,8 @@ def cmd_hover(args) -> int:
             lo, hi = args.range
             return _scan_hover_unit(handle, cb, getattr(args, "seconds", 30.0),
                                     interval, lo, hi)
+        # 命名器：字符串表只构造一次，供整个监听循环复用
+        namer = _names.UnitNamer(handle, bases)
         last = None
         rc = 0
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
@@ -749,7 +758,7 @@ def cmd_hover(args) -> int:
                     print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
                 else:
                     print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
-                    _dump_hover(handle, u["ptr"])
+                    _dump_hover(handle, u["ptr"], namer)
                 last = key
             if not watch:
                 break
