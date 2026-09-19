@@ -337,19 +337,49 @@ def read_unit_pos(handle: int, p_path: int, unit_type: int | None) -> tuple[int 
             proc.read_uint(handle, p_path + 0x10, 4))
 
 
-def read_hover_unit(handle: int, bases: dict[str, int]) -> dict:
+def hover_blocked_by_ui(handle: int, bases: dict[str, int]) -> list[str]:
+    """当前打开的、会挡住世界画面的 UI 面板名（读失败返回空，不影响主流程）。"""
+    try:
+        ui = read_ui_panels(handle, bases)
+        # open 里的名字带停靠侧后缀（如 "仓库(左)"），比对前先剥掉
+        return [n for n in (x.split("(")[0] for x in ui.get("open", []))
+                if n in off.UI_BLOCKS_HOVER]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def read_hover_unit(handle: int, bases: dict[str, int], gate: bool = True) -> dict:
     """读取鼠标当前指向的单位（只读）。返回 dict，读不到的字段为 None。
 
-    观测点优先级：
+    悬停开关（权威）：`D2WIN+0xCA664` HoverFlag
+      1 = 鼠标在可交互对象上（NPC / 物件 / 物品，含 UI 内物品）；0 = 地面/空处。
+      默认用它做门控（gate=True）：flag=0 时直接判「无悬停对象」，不解析 ptr。
+      ⇒ 解决了两个历史现象：移开瞬间闪出地面 tile、UI 打开时残留上一个世界对象。
+
+    单位来源优先级（flag=1 时）：
       1) CurrentViewItem(0x11BC38) —— 直接就是 UnitAny*（hackmap: 选择显示的物品）
       2) (HoverUnitId 0x119638, HoverUnitType 0x11964C) —— 函数体真正用于查表的那组，反查 unit 表
       3) (SelectedUnitFlag 0x11C2F4, Flag2 0x11C2F8) —— 另一组（实测悬停玩家时 id=1），同样反查
     """
     cb = bases.get("D2CLIENT")
-    out: dict = {"ptr": None, "source": "", "name": ""}
+    out: dict = {"ptr": None, "source": "", "name": "", "flag": None,
+                 "hx": None, "hy": None}
     if not cb:
         return out
     v = off.VARS["D2CLIENT"]
+
+    # ---- D2WIN 侧：悬停开关与悬停框屏幕坐标 ----
+    dw = bases.get("D2WIN")
+    if dw:
+        w = off.VARS["D2WIN"]
+        db = off.DLLBASE["D2WIN"]
+
+        def rdw(key: str):
+            return proc.read_uint(handle, dw + (w[key] - db), 4)
+
+        out["flag"] = rdw("HoverFlag")
+        out["hx"] = rdw("HoverX")
+        out["hy"] = rdw("HoverY")
 
     def rd(key: str):
         return proc.read_uint(handle, cb + (v[key] - off.DLLBASE["D2CLIENT"]), 4)
@@ -360,10 +390,21 @@ def read_hover_unit(handle: int, bases: dict[str, int]) -> dict:
     out["hover_type"] = rd("HoverUnitType")
     out["view_item"] = rd("CurrentViewItem")
 
+    # 悬停开关门控：flag=0 ⇒ 明确没有可交互对象（值再旧也不采信）
+    if gate and out["flag"] == 0:
+        out["source"] = "无悬停对象(HoverFlag=0)"
+        return out
+
     if out["view_item"]:
         out["ptr"] = out["view_item"]
         out["source"] = "CurrentViewItem(+0x11BC38)"
     else:
+        # UI 打开时鼠标不在世界画面，(unitId, 类型) 停在最后交互的世界对象上
+        # （典型：点储藏箱进仓库后一直显示"储藏箱"）。此时绝不回退反查。
+        blocked = hover_blocked_by_ui(handle, bases)
+        if blocked:
+            out["source"] = f"UI 打开中({'/'.join(blocked)})：鼠标在界面上，无指向物品"
+            return out
         for kid, kt in (("hover_id", "hover_type"), ("sel_id", "sel_type")):
             uid, ut = out[kid], out[kt]
             if uid and ut is not None and ut <= 5:

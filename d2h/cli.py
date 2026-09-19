@@ -544,12 +544,6 @@ UNIT_TYPE_NAME: dict[int, str] = {
 
 # 这些 UI 面板打开时鼠标停在界面上而非世界画面，游戏不会刷新"世界悬停"值，
 # 于是读数会停留在最后交互的对象（典型：仓库界面里一直显示储藏箱）。
-UI_BLOCKS_HOVER: set[str] = {
-    "仓库", "盒子", "商店", "NPC对话框", "传送", "任务物品提交窗",
-    "玩家交易", "佣兵装备", "背包", "赫拉迪克方块",
-}
-
-
 def _read_unit_head(handle, p: int):
     """逐字段读 UnitAny 头部（+0x00..+0x2C）。指针不可读返回 None。
 
@@ -720,17 +714,6 @@ def _scan_hover_unit(handle, cb: int, seconds: float, interval: float,
     return 0
 
 
-def _hover_blocked_ui(handle: int, bases: dict[str, int]) -> list[str]:
-    """当前打开的、会挡住世界画面的 UI 面板名（读失败返回空，不影响主流程）。"""
-    try:
-        from d2h.acquire import game as gm
-
-        ui = gm.read_ui_panels(handle, bases)
-        return [x for x in ui.get("open", []) if x in UI_BLOCKS_HOVER]
-    except Exception:  # noqa: BLE001
-        return []
-
-
 def cmd_hover(args) -> int:
     """读取鼠标当前指向的单位（UnitAny），只读。--watch 可持续监听。"""
     from d2h.acquire import game as gm
@@ -761,41 +744,58 @@ def cmd_hover(args) -> int:
                                     interval, lo, hi)
         # 命名器：字符串表只构造一次，供整个监听循环复用
         namer = _names.UnitNamer(handle, bases)
-        last = None
-        pending = None      # 去抖：待确认的新值
+        gate = not getattr(args, "no_gate", False)
+        if gate:
+            print("（悬停开关：D2WIN+0xCA664 HoverFlag —— 0 即判无悬停对象，"
+                  "地面/空处不再误报；加 --no-gate 关闭）")
+        last_key = None
+        had = False        # 上一状态是否「有悬停对象」
+        none_run = 0       # 连续 flag=0 的采样数
+        first = True       # 首次采样必打印状态（单次读数也总有输出）
         rc = 0
-        debounce = watch and not getattr(args, "no_debounce", False)
-        if debounce:
-            print(f"（已开启去抖：新值需连续 2 次采样一致才输出，间隔 {interval}s；"
-                  f"加 --no-debounce 可关闭）")
+        # 去抖只用于「移开」：flag=0 需连续 2 次才宣布，避免落单帧抖动
+        none_need = 2 if (watch and not getattr(args, "no_debounce", False)) else 1
         limit = watch and getattr(args, "seconds", 30.0) and args.seconds > 0
         deadline = time.time() + getattr(args, "seconds", 30.0) if limit else 0
         while True:
-            u = gm.read_hover_unit(handle, bases)
-            key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"),
-                   u.get("sel_id"), u.get("sel_type"))
-            if key != last:
-                # 鼠标移开瞬间游戏会先指向"地面/空地块"再清零，只闪一帧 —— 去抖滤掉
-                if debounce and key != pending:
-                    pending = key
-                else:
+            u = gm.read_hover_unit(handle, bases, gate=gate)
+            flag = u.get("flag")
+            if gate and flag == 0:
+                # 权威开关说没有可交互对象 —— 旧值（view_item / hover_id）一律不采信
+                none_run += 1
+                # 首帧不去抖（否则单次读数可能整轮无输出）
+                need = 1 if first else none_need
+                if none_run >= need and (had or first):
                     stamp = datetime.now().strftime("%H:%M:%S")
-                    print(f"[{stamp}] 悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
-                          f"选中(id=0x{u['sel_id'] or 0:X} type={u['sel_type']})  "
+                    if had:
+                        print(f"[{stamp}] 已移开（HoverFlag=0）  "
+                              f"旧值 id=0x{u.get('hover_id') or 0:X} "
+                              f"type={u.get('hover_type')} —— 不采信")
+                    else:
+                        print(f"[{stamp}] 无悬停对象（HoverFlag=0）"
+                              + (f"  旧值 id=0x{u.get('hover_id') or 0:X} "
+                                 f"type={u.get('hover_type')}" if u.get("hover_id") else ""))
+                    had = False
+                    last_key = None
+            else:
+                none_run = 0
+                key = (u.get("ptr"), u.get("hover_id"), u.get("hover_type"))
+                if key != last_key:
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[{stamp}] HoverFlag={flag} 框坐标=({u.get('hx')},{u.get('hy')})  "
+                          f"悬停(id=0x{u['hover_id'] or 0:X} type={u['hover_type']})  "
                           f"CurrentViewItem=0x{u['view_item'] or 0:08X}")
                     if not u.get("ptr"):
-                        print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
+                        if u.get("source"):
+                            print(f"  {u['source']}")
+                        else:
+                            print("  当前没有指向对象（把鼠标移到 NPC/怪物/物品上）")
                     else:
                         print(f"  -> UnitAny=0x{u['ptr']:08X}  来源: {u['source']}")
                         _dump_hover(handle, u["ptr"], namer)
-                        blocked = _hover_blocked_ui(handle, bases)
-                        if blocked:
-                            print(f"  （UI 打开中：{'/'.join(blocked)} —— 鼠标不在世界画面，"
-                                  f"悬停值会停留在最后交互的对象）")
-                    last = key
-                    pending = None
-            else:
-                pending = None
+                    last_key = key
+                    had = True
+            first = False
             if not watch:
                 break
             # 限时监听：--seconds > 0 时到点自动结束（便于非交互抓取，如脚本里跑 20 秒）
@@ -1356,7 +1356,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hp.add_argument(
         "--no-debounce", action="store_true",
-        help="--watch 关闭去抖（默认开启：新值需连续 2 次采样一致才输出，滤掉移开瞬间闪现的地面）",
+        help="--watch 关闭去抖（默认：移开需连续 2 次采样才宣布，滤掉单帧抖动）",
+    )
+    hp.add_argument(
+        "--no-gate", action="store_true",
+        help="关闭悬停开关门控（默认用 D2WIN+0xCA664 HoverFlag 判定是否真有悬停对象）",
     )
     hp.add_argument(
         "--seconds", type=float, default=30.0,

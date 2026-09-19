@@ -164,6 +164,14 @@ UI_PANEL_KEYS: dict[str, str] = {
     "帮助": "H",
 }
 
+# 会挡住世界画面的面板：打开时鼠标不在世界画面上，(unitId, 类型) 缓存会停在
+# 最后交互的世界对象上（例如点储藏箱进仓库后一直显示"储藏箱"）。
+# ⇒ 这些面板打开时禁止用 hover_id 反查世界单位，只看 CurrentViewItem（UI 内物品）。
+UI_BLOCKS_HOVER: set[str] = {
+    "仓库", "盒子", "商店", "NPC对话框", "传送", "任务物品提交窗",
+    "玩家交易", "佣兵装备", "背包", "赫拉迪克方块",
+}
+
 # 关联聚合位 A：D2CLIENT.dll + 0x11C414 —— 实测与上面面板联动（同源 UI 系统）
 #   0=无 / 1=右开（背包/技能树）/ 2=左开（属性/任务）/ 3=左右同时开
 UI_SIDE_FLAG: dict = {"module": "D2CLIENT", "offset": 0x11C414}
@@ -265,6 +273,18 @@ VARS: dict[str, dict[str, int]] = {
     },
     "D2WIN": {
         "FocusedControl": 0x6F9014B0,
+        # ---- 悬停提示框（hover box）状态；用户提供地址，2026-09-20 实测 ----
+        # HoverFlag = 1 时表示鼠标正悬停在「可交互对象」上（NPC / 物件 / 物品，
+        # 含仓库/背包 UI 内的物品）；指向地面或空处时为 0。
+        # 这是比 D2CLIENT 侧 (unitId, 类型) 更干净的悬停开关：移开立即归零，
+        # 不会出现「地面 tile 闪一帧」，也不会在 UI 打开时残留上一个世界对象。
+        # ⚠️ +0xCA658 / +0xCA65C 不是指针，是悬停框的屏幕坐标（整数，
+        #    实测 637~724 / 570~628）；+0xCA66C/+0xCA670 疑似宽高（109/99，待确认）。
+        "HoverFlag": 0x6F9AA664,
+        "HoverX": 0x6F9AA658,
+        "HoverY": 0x6F9AA65C,
+        "HoverW": 0x6F9AA66C,
+        "HoverH": 0x6F9AA670,
     },
     "D2NET": {
         "UnkNetFlag": 0x6FBFB244,
