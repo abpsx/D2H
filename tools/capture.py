@@ -11,6 +11,7 @@
 
 结果写到 <项目根>/temp/ui_out.txt；异常 traceback 与退出码一并记录。
 """
+import os
 import sys
 import io
 import traceback
@@ -18,6 +19,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# 抓取本身也是一次真实运行：日志照落盘（便于事后比对），但打上 src=agent
+# 标签，跟人工跑 bat（run/watch/uiwatch）区分开。要整块关掉用 D2H_LOG=0。
+os.environ.setdefault("D2H_LOG_SRC", "agent")
 
 from d2h import cli  # noqa: E402
 

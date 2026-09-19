@@ -2,7 +2,9 @@
 """D2H 统一入口（见规范 §15）。
 
 所有 D2H 的 Python 执行都经此入口；由 run.bat 唤起。
-每次运行：控制台(stdout) + logs/d2h_<时间戳>.txt 双写日志。
+每次运行：控制台(stdout) + logs/d2h_<时间戳>_<src>.txt **同步双写** ——
+print / logging / traceback 全部落盘（d2h/runlog.py 把 stdout 包成 Tee），
+`logs/latest.txt` 指向最近一次；D2H_LOG=0 可关闭落盘。
 子命令：info / snap / list / parse。
 
 硬性约束：本入口只触发"只读"采集，绝不写游戏内存。
@@ -25,31 +27,63 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from d2h import paths  # noqa: E402  （需在 sys.path 注入后导入）
+from d2h import paths, runlog  # noqa: E402  （需在 sys.path 注入后导入）
 
 LOGS = paths.LOGS  # 目录位置以 d2h/paths.py 为唯一权威（规范 §16）
 
 LOGGER = logging.getLogger("d2h")
 
 
-def setup_logging() -> Path:
-    """初始化双日志（控制台 + txt），返回日志文件路径。"""
-    LOGS.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logfile = LOGS / f"d2h_{ts}.txt"
+def setup_logging() -> Path | None:
+    """初始化日志：控制台 + logs/d2h_<时间戳>_<src>.txt 双写。
+
+    ★ 2026-09-20 修正（用户要求「bat 内所有打印调用都加上保存本地日志」）：
+      此前**只有 LOGGER 落盘**，满屏 `print()` 一条都没进文件 —— logs/ 里每个文件
+      才几百字节，排障时等于没日志。现在由 `d2h.runlog` 把 sys.stdout / sys.stderr
+      整体包成 Tee ⇒ **屏幕上出现的 = 盘里有的**（print、logging、traceback 全收）。
+
+    ★ 安装顺序（必须，反了会重复落盘）：
+        ① 先给 LOGGER 挂 StreamHandler（此刻捕获的是**原始** sys.stdout）；
+        ② 再把 sys.stdout / sys.stderr 换成 Tee。
+      反过来的话 LOGGER→sys.stdout(=Tee)→文件，同一行会在文件里出现两遍。
+
+    ★ 日志文件名里的 src 标签来自环境变量 D2H_LOG_SRC（bat 内设置）：
+        run.bat=run / watch.bat=watch / uiwatch.bat=uiwatch / capture.py=agent / 默认 cli
+      `logs/latest.txt` 永远指向最近一次日志，bat 结尾只提示这个路径即可。
+    ★ D2H_LOG=0 关闭落盘（返回 None，不创建文件）。
+    """
+    LOGGER.handlers.clear()          # 同进程内多次 main() 时避免 handler 叠加
     LOGGER.setLevel(logging.DEBUG)
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(module)s: %(message)s", "%H:%M:%S"
     )
     sh = logging.StreamHandler(sys.stdout)  # bat 可见（向 bat 输出执行过程）
     sh.setLevel(logging.INFO)
-    fh = logging.FileHandler(logfile, encoding="utf-8")  # 落盘存档
-    fh.setLevel(logging.DEBUG)
     sh.setFormatter(fmt)
-    fh.setFormatter(fmt)
     LOGGER.addHandler(sh)
+
+    if not runlog.enabled():
+        LOGGER.info("注意: 本次不写日志文件（D2H_LOG=0）")
+        return None
+
+    LOGS.mkdir(parents=True, exist_ok=True)
+    logfile = runlog.new_path(LOGS)
+    stream = runlog.open_stream(logfile)      # UTF-8 行缓冲，下面与 Sink 共用
+    sink = runlog.make_sink(stream, label="log")
+    # ★ handler 的 stream 必须是 Sink 而不是原始 stream：
+    #   watch 类命令的输出**全走 LOGGER**，直写句柄就会绕过大小上限（上限形同虚设）。
+    fh = logging.StreamHandler(sink)          # 与 print 共用同一额度 + 同一句柄
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
     LOGGER.addHandler(fh)
+
+    runlog.install(sink)                      # ← 必须在上面两个 handler 之后
+    runlog.write_header(stream)               # 元信息只进文件，不进控制台
+    runlog.write_latest(LOGS, logfile)
+
     LOGGER.info("D2H 启动 | 日志文件: %s", logfile)
+    LOGGER.info("日志说明: 控制台与文件同步双写（含全部 print）；"
+                "上限 %s 字节，可用 D2H_LOG_MAX_MB 调整", runlog.max_bytes())
     return logfile
 
 
@@ -1919,7 +1953,10 @@ def main(argv=None) -> int:
         _auto_errsnap(e, argv if argv is not None else sys.argv[1:], args)
         return 2
     finally:
-        LOGGER.info("本次日志已存档: %s", logfile)
+        if logfile is not None:
+            LOGGER.info("本次日志已存档: %s", logfile)
+        else:
+            LOGGER.info("本次未落盘（D2H_LOG=0）")
 
 
 if __name__ == "__main__":
