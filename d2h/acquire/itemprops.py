@@ -26,7 +26,8 @@ gpt = D2COMMON + (0x6FDEFB94 − DLLBASE_D2COMMON)      —— 描述区**基址
   +0x1C  208                ┘
   +0x20  ptr  0x132031A4    ┐ 内容为递增 WORD 序号表(0,1,2,…)，**未辨明**
   +0x24  1452               ┘
-  +0x28  0                 空槽（★曾误把它当 MagicSuffix 指针，已纠正）
+  +0x28  ptr  0x1238DE9C    ★2026-09-20 复测：**与 +0x2C 同值**（同指 0x90 块基址）
+                            ——早期在"非游戏内"态读到 0，遂误记为"空槽"，已更正
   +0x2C  ptr  ★ 0x90 块基址 B —— rec0 szName='of Health'
   +0x30  ptr  B + 747 行      —— rec1 szName='Sturdy'（rec0 空）
   +0x34  ptr  B + 1416 行     —— rec0 szName="Fletcher's"
@@ -124,7 +125,8 @@ DATA_TABLES_ABS = 0x6FDE9E1C
 GPT_N_ITEMS_TXT = 0x00
 GPT_ITEMTXT_CHUNKS = (0x08, 0x10, 0x18, 0x20)   # {ptr,count} 对
 GPT_SLOT_UNKNOWN_20 = 0x20
-GPT_SLOT_EMPTY_28 = 0x28
+GPT_SLOT_EMPTY_28 = 0x28      # ⚠️ 2026-09-20 复测：实测 == +0x2C（同指 0x90 块基址）。
+                              #    早期在非游戏态读到 0 ⇒ 旧注释"空槽"不准；常量名保留以免动调用点
 GPT_MAGIC_SUFFIX = 0x2C        # ★ 0x90 块基址（三段共用这一个基址）
 GPT_MAGIC_PREFIX = 0x30        # = 块基址 + 747 行（实测）
 GPT_AUTO_AFFIX = 0x34          # = 块基址 + 1416 行（实测；身份推断=automagic）
